@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { RefStamp } from "@/components/RefStamp";
 import { StatusPill } from "@/components/StatusPill";
 import { StatusChanger } from "@/components/StatusChanger";
@@ -15,7 +15,7 @@ export default async function ComplaintDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const supabase = await createClient();
+  const supabase = createAdminClient();
 
   const { data: complaint, error } = await supabase
     .from("complaints")
@@ -32,6 +32,12 @@ export default async function ComplaintDetailPage({
     .select("*")
     .eq("complaint_id", id)
     .order("changed_at", { ascending: false });
+
+  const { data: citizen } = await supabase
+    .from("app_users")
+    .select("full_name, cnic")
+    .eq("id", complaint.user_id)
+    .maybeSingle();
 
   return (
     <div className="max-w-4xl">
@@ -88,12 +94,16 @@ export default async function ComplaintDetailPage({
 
           <section className="bg-paper-raised border border-border rounded-md p-5 space-y-3">
             <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
-              Reporter
+              Citizen
             </h2>
             <dl className="text-sm space-y-2">
               <div className="flex justify-between gap-4">
-                <dt className="text-stone">Phone</dt>
-                <dd className="font-tabular text-ink">{complaint.phone}</dd>
+                <dt className="text-stone">Name</dt>
+                <dd className="text-ink text-right">{citizen?.full_name ?? "—"}</dd>
+              </div>
+              <div className="flex justify-between gap-4">
+                <dt className="text-stone">CNIC</dt>
+                <dd className="font-tabular text-ink">{citizen?.cnic ?? "—"}</dd>
               </div>
               <div className="flex justify-between gap-4">
                 <dt className="text-stone">Submitted</dt>

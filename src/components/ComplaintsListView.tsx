@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { ComplaintFilters } from "@/components/ComplaintFilters";
 import { Pagination } from "@/components/Pagination";
 import { StatusPill } from "@/components/StatusPill";
@@ -25,7 +25,7 @@ export async function ComplaintsListView({
   emptyDescription: string;
 }) {
   const page = Math.max(1, Number(params.page) || 1);
-  const supabase = await createClient();
+  const supabase = createAdminClient();
 
   let query = supabase
     .from("complaints")
@@ -41,13 +41,33 @@ export async function ComplaintsListView({
   if (params.area) query = query.ilike("area", `%${params.area}%`);
   if (params.from) query = query.gte("created_at", `${params.from}T00:00:00`);
   if (params.to) query = query.lte("created_at", `${params.to}T23:59:59`);
-  if (params.q) query = query.or(`ref_number.ilike.%${params.q}%,phone.ilike.%${params.q}%`);
+
+  if (params.q) {
+    // Complaints no longer carry a phone number — the citizen search now
+    // resolves against app_users (CNIC / full name) first, then filters
+    // complaints by ref_number OR by the matched user ids.
+    const { data: matchedUsers } = await supabase
+      .from("app_users")
+      .select("id")
+      .or(`cnic.ilike.%${params.q}%,full_name.ilike.%${params.q}%`);
+    const matchedIds = (matchedUsers ?? []).map((u) => u.id);
+
+    const orParts = [`ref_number.ilike.%${params.q}%`];
+    if (matchedIds.length > 0) orParts.push(`user_id.in.(${matchedIds.join(",")})`);
+    query = query.or(orParts.join(","));
+  }
 
   const from = (page - 1) * PAGE_SIZE;
   const to = from + PAGE_SIZE - 1;
   query = query.range(from, to);
 
   const { data: complaints, count, error } = await query;
+
+  const userIds = [...new Set((complaints ?? []).map((c) => c.user_id))];
+  const { data: citizens } = userIds.length
+    ? await supabase.from("app_users").select("id, full_name, cnic").in("id", userIds)
+    : { data: [] };
+  const citizenById = new Map((citizens ?? []).map((u) => [u.id, u]));
 
   const hasFilters = Boolean(
     params.status || params.category || params.area || params.from || params.to || params.q
@@ -80,6 +100,7 @@ export async function ComplaintsListView({
               <thead>
                 <tr className="bg-teal-deep text-paper text-left">
                   <th className="px-4 py-3 font-medium">Ref #</th>
+                  <th className="px-4 py-3 font-medium">Citizen</th>
                   <th className="px-4 py-3 font-medium">Category</th>
                   <th className="px-4 py-3 font-medium">Area</th>
                   <th className="px-4 py-3 font-medium">Submitted</th>
@@ -88,74 +109,92 @@ export async function ComplaintsListView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-border bg-paper-raised">
-                {complaints.map((c) => (
-                  <tr key={c.id} className="hover:bg-paper cursor-pointer transition-colors">
-                    <td className="px-4 py-3">
-                      <Link
-                        href={`/complaints/${c.id}`}
-                        className="font-tabular font-medium text-teal-deep hover:underline"
-                      >
-                        {c.ref_number}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 text-ink">
-                      <Link href={`/complaints/${c.id}`} className="block">
-                        {categoryLabel(c.category)}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 text-stone">
-                      <Link href={`/complaints/${c.id}`} className="block">
-                        {c.area}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 text-stone whitespace-nowrap">
-                      <Link href={`/complaints/${c.id}`} className="block">
-                        {formatWhen(c.created_at)}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3">
-                      <Link href={`/complaints/${c.id}`} className="block">
-                        {c.photo_url ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={c.photo_url}
-                            alt=""
-                            className="size-10 rounded object-cover border border-border"
-                          />
-                        ) : (
-                          <span className="text-stone/50">—</span>
-                        )}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <Link href={`/complaints/${c.id}`} className="inline-block">
-                        <StatusPill status={c.status} />
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
+                {complaints.map((c) => {
+                  const citizen = citizenById.get(c.user_id);
+                  return (
+                    <tr key={c.id} className="hover:bg-paper cursor-pointer transition-colors">
+                      <td className="px-4 py-3">
+                        <Link
+                          href={`/complaints/${c.id}`}
+                          className="font-tabular font-medium text-teal-deep hover:underline"
+                        >
+                          {c.ref_number}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Link href={`/complaints/${c.id}`} className="block">
+                          <span className="text-ink">{citizen?.full_name ?? "—"}</span>
+                          <span className="block text-xs text-stone font-tabular">
+                            {citizen?.cnic ?? ""}
+                          </span>
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3 text-ink">
+                        <Link href={`/complaints/${c.id}`} className="block">
+                          {categoryLabel(c.category)}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3 text-stone">
+                        <Link href={`/complaints/${c.id}`} className="block">
+                          {c.area}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3 text-stone whitespace-nowrap">
+                        <Link href={`/complaints/${c.id}`} className="block">
+                          {formatWhen(c.created_at)}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Link href={`/complaints/${c.id}`} className="block">
+                          {c.photo_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={c.photo_url}
+                              alt=""
+                              className="size-10 rounded object-cover border border-border"
+                            />
+                          ) : (
+                            <span className="text-stone/50">—</span>
+                          )}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <Link href={`/complaints/${c.id}`} className="inline-block">
+                          <StatusPill status={c.status} />
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
 
           {/* Mobile cards */}
           <ul className="md:hidden space-y-3">
-            {complaints.map((c) => (
-              <li key={c.id}>
-                <Link
-                  href={`/complaints/${c.id}`}
-                  className="block bg-paper-raised border border-border rounded-md p-4"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <RefStamp refNumber={c.ref_number} size="sm" />
-                    <StatusPill status={c.status} />
-                  </div>
-                  <p className="font-medium text-ink mt-3">{categoryLabel(c.category)}</p>
-                  <p className="text-sm text-stone">{c.area}</p>
-                  <p className="text-xs text-stone mt-2">{formatWhen(c.created_at)}</p>
-                </Link>
-              </li>
-            ))}
+            {complaints.map((c) => {
+              const citizen = citizenById.get(c.user_id);
+              return (
+                <li key={c.id}>
+                  <Link
+                    href={`/complaints/${c.id}`}
+                    className="block bg-paper-raised border border-border rounded-md p-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <RefStamp refNumber={c.ref_number} size="sm" />
+                      <StatusPill status={c.status} />
+                    </div>
+                    <p className="font-medium text-ink mt-3">{categoryLabel(c.category)}</p>
+                    <p className="text-sm text-stone">{c.area}</p>
+                    <p className="text-xs text-stone mt-1">
+                      {citizen?.full_name ?? "—"}
+                      {citizen?.cnic ? ` · ${citizen.cnic}` : ""}
+                    </p>
+                    <p className="text-xs text-stone mt-2">{formatWhen(c.created_at)}</p>
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
 
           <Pagination

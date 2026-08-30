@@ -17,7 +17,7 @@ export default async function ComplaintsPage({
         params={params}
         basePath="/complaints"
         emptyTitle="No complaints yet"
-        emptyDescription="Complaints submitted through WhatsApp will appear here."
+        emptyDescription="Complaints submitted through the ShehriLink app will appear here."
       />
     </div>
   );

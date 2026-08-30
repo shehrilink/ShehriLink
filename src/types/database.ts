@@ -9,20 +9,17 @@ export type ComplaintStatus = "pending" | "in_progress" | "resolved";
 
 export type AdminRole = "staff" | "supervisor";
 
-export type Session = {
-  phone: string;
-  current_step: string;
-  category: string | null;
-  area: string | null;
-  description: string | null;
-  photo_url: string | null;
-  updated_at: string;
-}
+export type AppUser = {
+  id: string;
+  cnic: string;
+  full_name: string;
+  created_at: string;
+};
 
 export type Complaint = {
   id: string;
   ref_number: string;
-  phone: string;
+  user_id: string;
   category: ComplaintCategory;
   area: string;
   description: string | null;
@@ -30,7 +27,7 @@ export type Complaint = {
   status: ComplaintStatus;
   created_at: string;
   updated_at: string;
-}
+};
 
 export type StatusHistory = {
   id: string;
@@ -38,14 +35,23 @@ export type StatusHistory = {
   old_status: ComplaintStatus | null;
   new_status: ComplaintStatus;
   changed_at: string;
-}
+};
+
+export type Notification = {
+  id: string;
+  user_id: string;
+  complaint_id: string | null;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+};
 
 export type AdminUser = {
   id: string;
   email: string;
   full_name: string | null;
   role: AdminRole;
-}
+};
 
 export type Setting = {
   key: string;
@@ -69,17 +75,17 @@ export const COMPLAINT_STATUSES: { value: ComplaintStatus; label: string }[] = [
 export interface Database {
   public: {
     Tables: {
-      sessions: {
-        Row: Session;
-        Insert: Partial<Session> & { phone: string };
-        Update: Partial<Session>;
+      app_users: {
+        Row: AppUser;
+        Insert: Partial<AppUser> & { id: string; cnic: string; full_name: string };
+        Update: Partial<AppUser>;
         Relationships: [];
       };
       complaints: {
         Row: Complaint;
         Insert: Partial<Complaint> & {
           ref_number: string;
-          phone: string;
+          user_id: string;
           category: ComplaintCategory;
           area: string;
         };
@@ -93,6 +99,12 @@ export interface Database {
           new_status: ComplaintStatus;
         };
         Update: Partial<StatusHistory>;
+        Relationships: [];
+      };
+      notifications: {
+        Row: Notification;
+        Insert: Partial<Notification> & { user_id: string; message: string };
+        Update: Partial<Notification>;
         Relationships: [];
       };
       admin_users: {

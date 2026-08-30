@@ -1,15 +1,31 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import type { ComplaintStatus } from "@/types/database";
+
+const STATUS_MESSAGES: Record<ComplaintStatus, string> = {
+  pending: "Your complaint is pending review.",
+  in_progress: "Your complaint is now being worked on.",
+  resolved: "Your complaint has been resolved.",
+};
 
 export async function updateComplaintStatus(
   complaintId: string,
   oldStatus: ComplaintStatus,
   newStatus: ComplaintStatus
 ) {
-  const supabase = await createClient();
+  const supabase = createAdminClient();
+
+  const { data: complaint, error: fetchError } = await supabase
+    .from("complaints")
+    .select("user_id, ref_number")
+    .eq("id", complaintId)
+    .maybeSingle();
+
+  if (fetchError || !complaint) {
+    return { error: fetchError?.message ?? "Complaint not found." };
+  }
 
   const { error: updateError } = await supabase
     .from("complaints")
@@ -30,26 +46,23 @@ export async function updateComplaintStatus(
     return { error: historyError.message };
   }
 
-  const { data: setting } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "n8n_webhook_url")
-    .maybeSingle();
+  // Notify the citizen directly via the notifications table — the mobile app
+  // subscribes to this over Supabase Realtime. This replaces the old n8n
+  // WhatsApp webhook call entirely.
+  const { error: notificationError } = await supabase.from("notifications").insert({
+    user_id: complaint.user_id,
+    complaint_id: complaintId,
+    message: `${complaint.ref_number}: ${STATUS_MESSAGES[newStatus]}`,
+  });
 
-  if (setting?.value) {
-    try {
-      await fetch(setting.value, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ complaint_id: complaintId, status: newStatus }),
-      });
-    } catch {
-      // Notification webhook failure shouldn't block the status update itself.
-    }
+  if (notificationError) {
+    // Don't fail the status update over a notification hiccup — but surface it.
+    console.error("Failed to create notification:", notificationError.message);
   }
 
   revalidatePath(`/complaints/${complaintId}`);
   revalidatePath("/complaints");
+  revalidatePath("/resolved");
   revalidatePath("/");
 
   return { error: null };

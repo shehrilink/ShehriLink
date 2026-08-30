@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { StatCard } from "@/components/StatCard";
 import { CategoryBarChart } from "@/components/CategoryBarChart";
 import { StatusPill } from "@/components/StatusPill";
@@ -9,7 +9,7 @@ import { formatWhen } from "@/lib/format";
 import { COMPLAINT_CATEGORIES } from "@/types/database";
 
 export default async function DashboardHomePage() {
-  const supabase = await createClient();
+  const supabase = createAdminClient();
 
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -75,7 +75,7 @@ export default async function DashboardHomePage() {
       {!hasData ? (
         <EmptyState
           title="No complaints yet"
-          description="Once citizens report issues over WhatsApp, activity will show up here."
+          description="Once citizens report issues through the ShehriLink app, activity will show up here."
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -1,10 +1,10 @@
 "use client";
 
 import { useActionState } from "react";
-import { saveWebhookUrl } from "./actions";
+import { saveDailyComplaintLimit } from "./actions";
 
-export function WebhookForm({ initialValue }: { initialValue: string }) {
-  const [state, formAction, pending] = useActionState(saveWebhookUrl, {
+export function DailyLimitForm({ initialValue }: { initialValue: string }) {
+  const [state, formAction, pending] = useActionState(saveDailyComplaintLimit, {
     error: null,
     ok: false,
   });
@@ -12,20 +12,21 @@ export function WebhookForm({ initialValue }: { initialValue: string }) {
   return (
     <form action={formAction} className="space-y-3">
       <div>
-        <label htmlFor="webhook_url" className="block text-sm font-medium text-ink mb-1.5">
-          n8n status-update webhook URL
+        <label htmlFor="daily_limit" className="block text-sm font-medium text-ink mb-1.5">
+          Max complaints per citizen per day
         </label>
         <input
-          id="webhook_url"
-          name="webhook_url"
-          type="url"
+          id="daily_limit"
+          name="daily_limit"
+          type="number"
+          min={1}
+          step={1}
           defaultValue={initialValue}
-          placeholder="https://n8n.example.com/webhook/status-update"
-          className="w-full rounded-md border border-border-strong bg-paper px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-teal-mid"
+          placeholder="No limit"
+          className="w-full max-w-xs rounded-md border border-border-strong bg-paper px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-teal-mid"
         />
         <p className="text-xs text-stone mt-1.5">
-          Called with <code className="font-tabular">{"{ complaint_id, status }"}</code> whenever a
-          complaint&apos;s status changes, so the citizen can be notified on WhatsApp.
+          Enforced in the ShehriLink mobile app. Leave blank to allow unlimited complaints.
         </p>
       </div>
 

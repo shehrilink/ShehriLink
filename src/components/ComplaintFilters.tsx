@@ -38,7 +38,7 @@ export function ComplaintFilters({ hideStatus = false }: { hideStatus?: boolean 
           onChange={(e) => setQ(e.target.value)}
           onBlur={() => updateParams({ q })}
           onKeyDown={(e) => e.key === "Enter" && updateParams({ q })}
-          placeholder="Search ref # or phone number"
+          placeholder="Search ref #, CNIC, or name"
           className="min-w-0 rounded-md border border-border-strong bg-paper px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-teal-mid"
         />
 
