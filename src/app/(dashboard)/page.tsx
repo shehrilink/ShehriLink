@@ -21,6 +21,7 @@ export default async function DashboardHomePage() {
     { count: inProgress },
     { count: resolved },
     { count: resolvedThisWeek },
+    { count: highUrgencyOpen },
     { data: recentCategories },
     { data: recentActivity, error: activityError },
   ] = await Promise.all([
@@ -36,6 +37,11 @@ export default async function DashboardHomePage() {
       .select("*", { count: "exact", head: true })
       .eq("status", "resolved")
       .gte("updated_at", weekAgo),
+    supabase
+      .from("complaints")
+      .select("*", { count: "exact", head: true })
+      .eq("ai_urgency", "high")
+      .neq("status", "resolved"),
     supabase.from("complaints").select("category").gte("created_at", thirtyDaysAgo),
     supabase
       .from("status_history")
@@ -64,12 +70,15 @@ export default async function DashboardHomePage() {
     <div>
       <h1 className="font-display font-bold text-2xl text-teal-deep mb-6">Dashboard</h1>
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4 mb-8">
         <StatCard label="Total" value={total ?? 0} />
         <StatCard label="Pending" value={pending ?? 0} accent="amber" />
         <StatCard label="In Progress" value={inProgress ?? 0} accent="teal" />
         <StatCard label="Resolved" value={resolved ?? 0} accent="green" />
         <StatCard label="Resolved this week" value={resolvedThisWeek ?? 0} accent="green" />
+        <Link href="/complaints?urgency=high">
+          <StatCard label="High urgency (open)" value={highUrgencyOpen ?? 0} accent="brick" />
+        </Link>
       </div>
 
       {!hasData ? (

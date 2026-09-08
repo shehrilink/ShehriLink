@@ -7,6 +7,8 @@ export type ComplaintCategory =
 
 export type ComplaintStatus = "pending" | "in_progress" | "resolved";
 
+export type ComplaintUrgency = "low" | "medium" | "high";
+
 export type AdminRole = "staff" | "supervisor";
 
 export type AppUser = {
@@ -27,6 +29,12 @@ export type Complaint = {
   status: ComplaintStatus;
   created_at: string;
   updated_at: string;
+  ai_urgency: ComplaintUrgency | null;
+  ai_urgency_confidence: number | null;
+  ai_category: ComplaintCategory | null;
+  ai_category_confidence: number | null;
+  ai_predicted_at: string | null;
+  ai_model_version: string | null;
 };
 
 export type StatusHistory = {
@@ -64,6 +72,12 @@ export const COMPLAINT_CATEGORIES: { value: ComplaintCategory; label: string }[]
   { value: "water_supply", label: "Water Supply" },
   { value: "sewage", label: "Sewage" },
   { value: "garbage", label: "Garbage" },
+];
+
+export const COMPLAINT_URGENCIES: { value: ComplaintUrgency; label: string }[] = [
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
 ];
 
 export const COMPLAINT_STATUSES: { value: ComplaintStatus; label: string }[] = [

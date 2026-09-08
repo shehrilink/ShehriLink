@@ -2,7 +2,11 @@
 
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useState, useTransition } from "react";
-import { COMPLAINT_CATEGORIES, COMPLAINT_STATUSES } from "@/types/database";
+import {
+  COMPLAINT_CATEGORIES,
+  COMPLAINT_STATUSES,
+  COMPLAINT_URGENCIES,
+} from "@/types/database";
 
 export function ComplaintFilters({ hideStatus = false }: { hideStatus?: boolean }) {
   const router = useRouter();
@@ -29,7 +33,7 @@ export function ComplaintFilters({ hideStatus = false }: { hideStatus?: boolean 
     <div className="bg-paper-raised border border-border rounded-md p-4 mb-5">
       <div
         className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${
-          hideStatus ? "lg:grid-cols-3" : "lg:grid-cols-4"
+          hideStatus ? "lg:grid-cols-4" : "lg:grid-cols-5"
         }`}
       >
         <input
@@ -70,6 +74,19 @@ export function ComplaintFilters({ hideStatus = false }: { hideStatus?: boolean 
           ))}
         </select>
 
+        <select
+          defaultValue={searchParams.get("urgency") ?? ""}
+          onChange={(e) => updateParams({ urgency: e.target.value || null })}
+          className="min-w-0 rounded-md border border-border-strong bg-paper px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-teal-mid"
+        >
+          <option value="">All urgencies (AI)</option>
+          {COMPLAINT_URGENCIES.map((u) => (
+            <option key={u.value} value={u.value}>
+              {u.label} urgency
+            </option>
+          ))}
+        </select>
+
         <input
           type="text"
           value={area}
@@ -100,24 +117,40 @@ export function ComplaintFilters({ hideStatus = false }: { hideStatus?: boolean 
         />
       </div>
 
-      {(searchParams.get("q") ||
-        searchParams.get("status") ||
-        searchParams.get("category") ||
-        searchParams.get("area") ||
-        searchParams.get("from") ||
-        searchParams.get("to")) && (
-        <button
-          type="button"
-          onClick={() => {
-            setQ("");
-            setArea("");
-            router.push(pathname);
-          }}
-          className="mt-3 text-xs font-medium text-teal-mid hover:text-teal-deep"
-        >
-          Clear filters
-        </button>
-      )}
+      <div className="mt-3 flex items-center gap-4">
+        <label className="flex items-center gap-2 text-xs font-medium text-stone cursor-pointer">
+          <input
+            type="checkbox"
+            checked={searchParams.get("sort") === "urgency"}
+            onChange={(e) =>
+              updateParams({ sort: e.target.checked ? "urgency" : null })
+            }
+            className="accent-teal-mid"
+          />
+          Most urgent first (AI)
+        </label>
+
+        {(searchParams.get("q") ||
+          searchParams.get("status") ||
+          searchParams.get("category") ||
+          searchParams.get("urgency") ||
+          searchParams.get("area") ||
+          searchParams.get("from") ||
+          searchParams.get("to") ||
+          searchParams.get("sort")) && (
+          <button
+            type="button"
+            onClick={() => {
+              setQ("");
+              setArea("");
+              router.push(pathname);
+            }}
+            className="text-xs font-medium text-teal-mid hover:text-teal-deep"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
     </div>
   );
 }

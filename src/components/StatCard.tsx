@@ -5,12 +5,13 @@ export function StatCard({
 }: {
   label: string;
   value: number;
-  accent?: "amber" | "teal" | "green" | "default";
+  accent?: "amber" | "teal" | "green" | "brick" | "default";
 }) {
   const accentClass = {
     amber: "text-amber",
     teal: "text-teal-mid",
     green: "text-green",
+    brick: "text-brick",
     default: "text-teal-deep",
   }[accent ?? "default"];
 

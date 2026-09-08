@@ -3,11 +3,19 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { ComplaintFilters } from "@/components/ComplaintFilters";
 import { Pagination } from "@/components/Pagination";
 import { StatusPill } from "@/components/StatusPill";
+import { UrgencyPill } from "@/components/UrgencyPill";
 import { RefStamp } from "@/components/RefStamp";
 import { EmptyState } from "@/components/EmptyState";
 import { categoryLabel } from "@/lib/labels";
 import { formatWhen } from "@/lib/format";
-import type { ComplaintCategory, ComplaintStatus } from "@/types/database";
+import { withTriage } from "@/lib/ml/triage";
+import type {
+  ComplaintCategory,
+  ComplaintStatus,
+  ComplaintUrgency,
+} from "@/types/database";
+
+const URGENCY_RANK: Record<ComplaintUrgency, number> = { high: 0, medium: 1, low: 2 };
 
 const PAGE_SIZE = 25;
 
@@ -38,6 +46,7 @@ export async function ComplaintsListView({
     query = query.eq("status", params.status as ComplaintStatus);
   }
   if (params.category) query = query.eq("category", params.category as ComplaintCategory);
+  if (params.urgency) query = query.eq("ai_urgency", params.urgency as ComplaintUrgency);
   if (params.area) query = query.ilike("area", `%${params.area}%`);
   if (params.from) query = query.gte("created_at", `${params.from}T00:00:00`);
   if (params.to) query = query.lte("created_at", `${params.to}T23:59:59`);
@@ -61,7 +70,18 @@ export async function ComplaintsListView({
   const to = from + PAGE_SIZE - 1;
   query = query.range(from, to);
 
-  const { data: complaints, count, error } = await query;
+  const { data: rawComplaints, count, error } = await query;
+
+  // Fill + cache AI urgency/category for any complaint on this page that
+  // hasn't been triaged yet, then (optionally) surface the urgent ones first.
+  let complaints = rawComplaints ? await withTriage(rawComplaints) : rawComplaints;
+  if (complaints && params.sort === "urgency") {
+    complaints = [...complaints].sort(
+      (a, b) =>
+        (a.ai_urgency ? URGENCY_RANK[a.ai_urgency] : 3) -
+        (b.ai_urgency ? URGENCY_RANK[b.ai_urgency] : 3)
+    );
+  }
 
   const userIds = [...new Set((complaints ?? []).map((c) => c.user_id))];
   const { data: citizens } = userIds.length
@@ -70,7 +90,13 @@ export async function ComplaintsListView({
   const citizenById = new Map((citizens ?? []).map((u) => [u.id, u]));
 
   const hasFilters = Boolean(
-    params.status || params.category || params.area || params.from || params.to || params.q
+    params.status ||
+      params.category ||
+      params.urgency ||
+      params.area ||
+      params.from ||
+      params.to ||
+      params.q
   );
 
   return (
@@ -102,6 +128,7 @@ export async function ComplaintsListView({
                   <th className="px-4 py-3 font-medium">Ref #</th>
                   <th className="px-4 py-3 font-medium">Citizen</th>
                   <th className="px-4 py-3 font-medium">Category</th>
+                  <th className="px-4 py-3 font-medium">Urgency</th>
                   <th className="px-4 py-3 font-medium">Area</th>
                   <th className="px-4 py-3 font-medium">Submitted</th>
                   <th className="px-4 py-3 font-medium">Photo</th>
@@ -132,6 +159,15 @@ export async function ComplaintsListView({
                       <td className="px-4 py-3 text-ink">
                         <Link href={`/complaints/${c.id}`} className="block">
                           {categoryLabel(c.category)}
+                        </Link>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Link href={`/complaints/${c.id}`} className="block">
+                          <UrgencyPill
+                            urgency={c.ai_urgency}
+                            confidence={c.ai_urgency_confidence}
+                            size="sm"
+                          />
                         </Link>
                       </td>
                       <td className="px-4 py-3 text-stone">
@@ -182,7 +218,14 @@ export async function ComplaintsListView({
                   >
                     <div className="flex items-start justify-between gap-3">
                       <RefStamp refNumber={c.ref_number} size="sm" />
-                      <StatusPill status={c.status} />
+                      <div className="flex items-center gap-2">
+                        <UrgencyPill
+                          urgency={c.ai_urgency}
+                          confidence={c.ai_urgency_confidence}
+                          size="sm"
+                        />
+                        <StatusPill status={c.status} />
+                      </div>
                     </div>
                     <p className="font-medium text-ink mt-3">{categoryLabel(c.category)}</p>
                     <p className="text-sm text-stone">{c.area}</p>

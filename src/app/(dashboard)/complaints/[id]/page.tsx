@@ -5,8 +5,10 @@ import { RefStamp } from "@/components/RefStamp";
 import { StatusPill } from "@/components/StatusPill";
 import { StatusChanger } from "@/components/StatusChanger";
 import { PhotoZoom } from "@/components/PhotoZoom";
+import { UrgencyPill } from "@/components/UrgencyPill";
 import { categoryLabel } from "@/lib/labels";
 import { formatWhen } from "@/lib/format";
+import { withTriageOne } from "@/lib/ml/triage";
 import type { StatusHistory } from "@/types/database";
 
 export default async function ComplaintDetailPage({
@@ -26,6 +28,10 @@ export default async function ComplaintDetailPage({
   if (error || !complaint) {
     notFound();
   }
+
+  const triaged = await withTriageOne(complaint);
+  const categoryMismatch =
+    triaged.ai_category != null && triaged.ai_category !== triaged.category;
 
   const { data: history } = await supabase
     .from("status_history")
@@ -56,7 +62,13 @@ export default async function ComplaintDetailPage({
           </h1>
           <p className="text-stone text-sm mt-1">{complaint.area}</p>
         </div>
-        <StatusPill status={complaint.status} />
+        <div className="flex items-center gap-2">
+          <UrgencyPill
+            urgency={triaged.ai_urgency}
+            confidence={triaged.ai_urgency_confidence}
+          />
+          <StatusPill status={complaint.status} />
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -90,6 +102,49 @@ export default async function ComplaintDetailPage({
         <div className="space-y-6">
           <section className="bg-paper-raised border border-border rounded-md p-5">
             <StatusChanger complaintId={complaint.id} status={complaint.status} />
+          </section>
+
+          <section className="bg-paper-raised border border-border rounded-md p-5 space-y-3">
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-stone">
+              AI Triage
+            </h2>
+            {triaged.ai_predicted_at == null ? (
+              <p className="text-sm text-stone">Not available for this complaint.</p>
+            ) : (
+              <dl className="text-sm space-y-2">
+                <div className="flex justify-between gap-4 items-center">
+                  <dt className="text-stone">Urgency</dt>
+                  <dd>
+                    <UrgencyPill
+                      urgency={triaged.ai_urgency}
+                      confidence={triaged.ai_urgency_confidence}
+                      size="sm"
+                    />
+                  </dd>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <dt className="text-stone">Suggested category</dt>
+                  <dd className="text-ink text-right">
+                    {triaged.ai_category ? categoryLabel(triaged.ai_category) : "—"}
+                    {triaged.ai_category_confidence != null && (
+                      <span className="block text-xs text-stone">
+                        {Math.round(triaged.ai_category_confidence * 100)}% confidence
+                      </span>
+                    )}
+                  </dd>
+                </div>
+                {categoryMismatch && (
+                  <p className="text-xs text-amber bg-amber/10 rounded px-2 py-1.5">
+                    Citizen filed this as {categoryLabel(triaged.category)}, but the
+                    model suggests {categoryLabel(triaged.ai_category!)}.
+                  </p>
+                )}
+                <p className="text-[11px] text-stone/70 pt-1">
+                  Predicted automatically from the description. Not a substitute for
+                  staff review.
+                </p>
+              </dl>
+            )}
           </section>
 
           <section className="bg-paper-raised border border-border rounded-md p-5 space-y-3">
