@@ -5,9 +5,18 @@
 | | |
 |---|---|
 | Project title | ShehriLink |
-| Document version | 1.0 |
-| Date | 2 September 2026 |
+| Document version | 2.0 |
+| Date | 9 September 2026 |
 | Prepared by | Project Team, Business Upscalers |
+
+> **Change log — v2.0.** The AI layer described in Chapter 5 has been built and
+> shipped. It differs from the v1.0 plan: instead of a photo CNN plus a text
+> classifier served from a FastAPI service on the VPS, the delivered feature is
+> two **text classifiers — urgency and category — that run as pure TypeScript
+> inside the admin dashboard** (no separate service, no Python at run time) and
+> cache their predictions on the `complaints` row. Chapters 1–7 and the
+> appendices have been updated to match the implementation; the photo classifier
+> is now listed under Future Work (Section 7.4).
 
 ---
 
@@ -40,17 +49,18 @@
   - [4.2 Unit Testing](#42-unit-testing)
   - [4.3 Integration Testing](#43-integration-testing)
   - [4.4 Acceptance Testing](#44-acceptance-testing)
-- [Chapter 5 — AI / Machine Learning Integration](#chapter-5--ai--machine-learning-integration)
+- [Chapter 5 — AI-Assisted Complaint Triage](#chapter-5--ai-assisted-complaint-triage)
   - [5.1 Overview & Motivation](#51-overview--motivation)
   - [5.2 Models](#52-models)
-  - [5.3 Model Export Strategy](#53-model-export-strategy)
-  - [5.4 Integration Paths](#54-integration-paths)
-  - [5.5 Recommended Architecture](#55-recommended-architecture)
-  - [5.6 Inference API Specification](#56-inference-api-specification)
-  - [5.7 Deployment on the Contabo VPS](#57-deployment-on-the-contabo-vps)
-  - [5.8 Flutter Client Integration](#58-flutter-client-integration)
-  - [5.9 Model Lifecycle, Monitoring & Retraining](#59-model-lifecycle-monitoring--retraining)
-  - [5.10 ML Test Cases](#510-ml-test-cases)
+  - [5.3 Model Export — .pkl → JSON](#53-model-export--pkl--json)
+  - [5.4 In-Dashboard Inference](#54-in-dashboard-inference)
+  - [5.5 Triage Orchestration & Caching](#55-triage-orchestration--caching)
+  - [5.6 Database Schema Changes](#56-database-schema-changes)
+  - [5.7 Dashboard UI Surface](#57-dashboard-ui-surface)
+  - [5.8 Backfill Endpoint](#58-backfill-endpoint)
+  - [5.9 Design Trade-offs — Why No Service](#59-design-trade-offs--why-no-service)
+  - [5.10 Model Lifecycle & Retraining](#510-model-lifecycle--retraining)
+  - [5.11 ML Test Cases](#511-ml-test-cases)
 - [Chapter 6 — User Interface](#chapter-6--user-interface)
 - [Chapter 7 — Conclusion](#chapter-7--conclusion)
   - [7.1 Problems Faced](#71-problems-faced)
@@ -79,11 +89,11 @@
 | Figure 9 | Entity Relationship Diagram | 3.7 |
 | Figure 10 | Collaboration Diagram | 3.8 |
 | Figure 11 | State Transition Diagram — Complaint Lifecycle | 3.9 |
-| Figure 12 | ML Inference Architecture | 5.5 |
-| Figure 13 | Model Training → Export → Serving Pipeline | 5.3 |
-| Figure 14 | Admin Dashboard — Home | 6 |
-| Figure 15 | Admin Dashboard — Complaints List | 6 |
-| Figure 16 | Admin Dashboard — Complaint Detail | 6 |
+| Figure 12 | AI Triage Data Flow | 5.1 |
+| Figure 13 | Model Training → JSON Export → In-Dashboard Inference | 5.3 |
+| Figure 14 | Admin Dashboard — Home (with High-urgency card) | 6 |
+| Figure 15 | Admin Dashboard — Complaints List (with Urgency column) | 6 |
+| Figure 16 | Admin Dashboard — Complaint Detail (with AI Triage card) | 6 |
 | Figure 17 | Mobile App — Report Issue | 6 |
 | Figure 18 | Mobile App — My Complaints | 6 |
 
@@ -110,10 +120,12 @@ The platform has two front-ends over one shared backend:
    manage staff accounts and configure system-wide settings.
 
 The backend is provided by Supabase (PostgreSQL, authentication, storage, and row-level
-security). A later phase adds an **AI-assisted triage layer** (Chapter 5): a convolutional
-neural network that classifies the complaint photo, and a text classifier that classifies the
-complaint description, so that a submitted complaint can be auto-categorised and routed
-faster.
+security). An **AI-assisted triage layer** (Chapter 5) is built into the dashboard: two
+trained text classifiers score every complaint the moment staff first open it — one predicts
+**urgency** (`low` / `medium` / `high`), the other predicts the **category** and flags any
+disagreement with the category the citizen chose. Both models run as plain TypeScript inside
+the Next.js server (no separate service), and each prediction is cached on the complaint row
+so it is computed only once.
 
 ### 1.1 Objectives
 
@@ -124,8 +136,10 @@ faster.
 - Notify the reporting citizen automatically whenever a complaint's status changes.
 - Enforce a configurable daily complaint limit per citizen to deter spam.
 - Restrict sensitive operations (user management, settings) to supervisor accounts.
-- **(Phase 2)** Auto-suggest the complaint category from the photo and the description
-  using machine learning, reducing manual triage time and mis-categorisation.
+- Automatically predict each complaint's **urgency** so staff can work the most serious
+  issues first instead of strictly first-in-first-out.
+- Automatically predict each complaint's **category** and warn staff when it disagrees with
+  the citizen's choice, reducing mis-routing.
 
 ### 1.2 Problem Statement
 
@@ -142,7 +156,8 @@ result:
 ShehriLink addresses this by giving both sides a shared, structured system: every complaint is
 recorded once, categorised, assigned a reference number, tracked through a defined lifecycle
 (`pending → in_progress → resolved`), and every change is logged and communicated back to the
-citizen. The AI layer further reduces the manual effort of categorising each incoming report.
+citizen. The AI triage layer further helps staff by ordering the queue by predicted urgency
+and by catching mis-categorised reports before they are routed to the wrong department.
 
 ### 1.3 Assumptions & Constraints
 
@@ -162,10 +177,12 @@ citizen. The AI layer further reduces the manual effort of categorising each inc
 - Complaint status is limited to three values: `pending`, `in_progress`, `resolved`.
 - Admin roles are limited to two: `staff` and `supervisor`.
 - The dashboard is built on Next.js 16 (App Router) and React 19; the backend is Supabase.
-- Hosting for auxiliary services (the ML inference API) is the team's existing Contabo VPS.
 - The mobile app is built with Flutter for cross-platform (Android first).
-- Budget constraints rule out managed ML hosting (e.g. SageMaker); models must run on the
-  existing VPS or on-device.
+- Budget and operational constraints rule out any dedicated ML infrastructure: the trained
+  models are small linear classifiers and must run **inside the dashboard process** with no
+  extra service, container, or host.
+- The urgency and category classifiers operate on **text only** (complaint description +
+  area). Photo-based classification is out of scope for this release (Section 7.4).
 
 ---
 
@@ -180,8 +197,9 @@ citizen. The AI layer further reduces the manual effort of categorising each inc
 | SeeClickFix (USA) | Citizens report non-emergency municipal issues; routed to local government. | Confirms the report-track-resolve model; ShehriLink adds CNIC identity and a daily limit. |
 | FixMyStreet (UK) | Open-source platform mapping street problems to councils. | Category + location + photo pattern; ShehriLink uses fixed categories for cleaner analytics. |
 | Pakistan Citizen Portal | National grievance-redressal app with status tracking. | Validates demand in the local context; ShehriLink is scoped to one municipality with a purpose-built staff dashboard. |
-| Waste-classification CNNs (literature) | MobileNet/EfficientNet transfer-learning models classifying waste and street imagery. | Basis for the Phase-2 image classifier (Section 5.2). |
-| Short-text intent classification (TF-IDF + linear models) | Classical NLP pipelines outperform heavy models on short, domain-specific text with small datasets. | Basis for the Phase-2 text classifier (Section 5.2). |
+| Short-text intent classification (TF-IDF + linear models) | Classical NLP pipelines match or beat heavy models on short, domain-specific text with small datasets, and a linear model's decision function is a plain dot product. | Basis for both delivered classifiers (Section 5.2) and for porting inference to TypeScript (Section 5.4). |
+| Ticket-priority / urgency prediction (help-desk literature) | Support systems routinely learn a priority label (low/medium/high) from ticket text to reorder the queue. | Basis for the urgency classifier (Section 5.2). |
+| Waste- and infrastructure-image CNNs (MobileNet/EfficientNet) | Transfer-learning models classify street and waste imagery on-device or on cheap CPUs. | Reference for the deferred photo classifier (Section 7.4). |
 
 ### 2.2 List of Stakeholders
 
@@ -216,24 +234,27 @@ citizen. The AI layer further reduces the manual effort of categorising each inc
 | FR-16 | A supervisor can create, view, and deactivate staff/supervisor accounts. |
 | FR-17 | A supervisor can update the daily complaint limit setting. |
 | FR-18 | A "Resolved" view lists all resolved complaints separately. |
-| FR-19 | **(Phase 2)** On submission, the system suggests a category from the photo (CNN) and description (text classifier). |
-| FR-20 | **(Phase 2)** The suggested category and model confidence are stored with the complaint and shown to staff. |
+| FR-19 | When staff first open a complaint (in the list or on its detail page), the dashboard predicts its urgency (`low` / `medium` / `high`) and its category from the complaint text. |
+| FR-20 | The predicted urgency, predicted category, and both confidence scores are cached on the complaint row and shown to staff; a mismatch between the predicted and citizen-selected category is flagged. |
+| FR-21 | Staff can filter the complaints list by predicted urgency, sort it "most urgent first", and see a "High urgency (open)" count on the dashboard home. |
+| FR-22 | A supervisor can trigger a one-shot backfill that scores every not-yet-triaged complaint. |
 
 ### 2.4 Non-Functional Requirements
 
 | ID | Category | Requirement |
 |---|---|---|
 | NFR-01 | Performance | Dashboard pages render in under 2 s on a broadband connection; complaint list queries paginate at 20 rows. |
-| NFR-02 | Performance | ML inference response (API path) returns within 800 ms for a single image + text at the 95th percentile. |
+| NFR-02 | Performance | Triage inference is an in-process pure function with no network or disk I/O; scoring one complaint completes in under 5 ms, and each complaint is scored at most once (result cached on the row). |
 | NFR-03 | Security | All admin routes require an authenticated session; supervisor-only routes reject staff. |
 | NFR-04 | Security | Row-level security on Supabase ensures a citizen can read only their own complaints and notifications. |
-| NFR-05 | Security | All traffic (app ↔ backend, app ↔ ML API) is over HTTPS/TLS. |
+| NFR-05 | Security | All traffic (app ↔ Supabase, dashboard ↔ Supabase) is over HTTPS/TLS. |
 | NFR-06 | Reliability | Status changes and the corresponding history entry and notification are written atomically. |
 | NFR-07 | Usability | The mobile complaint form is completable in under 60 seconds. |
 | NFR-08 | Scalability | The architecture supports at least 50,000 complaints and 20,000 citizens without redesign. |
 | NFR-09 | Maintainability | Shared domain types are defined once (`src/types/database.ts`) and reused across the dashboard. |
-| NFR-10 | Portability | The ML API is containerised and can move between VPS hosts with no code change. |
-| NFR-11 | Availability | The ML API degrades gracefully: if it is unreachable, complaint submission still succeeds without a suggestion. |
+| NFR-10 | Portability | The model is shipped as a single ~220 KB JSON file (`src/lib/ml/model-bundle.json`); inference needs no runtime beyond the dashboard itself, so it deploys wherever the dashboard deploys (e.g. Vercel) with no extra host. |
+| NFR-11 | Availability | Triage degrades gracefully: if a prediction or its write-back fails, the complaint still renders with no urgency/suggestion and the rest of the dashboard is unaffected. |
+| NFR-12 | Correctness | The TypeScript inference reproduces the scikit-learn pipeline's class probabilities to within 1 × 10⁻⁴ on a labelled validation sample. |
 
 ### 2.5 Requirements Traceability Matrix (RTM)
 
@@ -257,8 +278,10 @@ citizen. The AI layer further reduces the manual effort of categorising each inc
 | FR-16 | UC-12 Manage Users | `users/actions.ts`, `admin` client | TC-USR-01..04 |
 | FR-17 | UC-13 Update Settings | `settings/actions.ts`, `DailyLimitForm` | TC-SET-01..02 |
 | FR-18 | UC-14 View Resolved | `resolved/page.tsx` | TC-LIST-02 |
-| FR-19 | UC-15 Auto-suggest Category | ML Architecture (5.5), Inference API (5.6) | TC-ML-01..06 |
-| FR-20 | UC-15 Auto-suggest Category | `complaints.suggested_category`, `suggestion_confidence` | TC-ML-05 |
+| FR-19 | UC-15 Auto-Triage Complaint | Inference (5.4), `src/lib/ml/tfidf-lr.ts`, `triage.ts` | TC-ML-01..05 |
+| FR-20 | UC-15 Auto-Triage Complaint | `complaints.ai_*` columns (5.6), AI Triage card (5.7) | TC-ML-06..07 |
+| FR-21 | UC-16 Work by Urgency | Urgency column / filter / sort, "High urgency (open)" card (5.7) | TC-ML-08..10 |
+| FR-22 | UC-17 Backfill Triage | `POST /api/triage-backfill` (5.8) | TC-ML-11 |
 
 ### 2.6 Use Case Descriptions
 
@@ -268,9 +291,9 @@ citizen. The AI layer further reduces the manual effort of categorising each inc
 |---|---|
 | Actor | Citizen |
 | Precondition | Citizen is logged in and has not exceeded the daily complaint limit. |
-| Main flow | 1. Citizen opens "Report Issue". 2. Selects a category, enters area, optionally a description, optionally captures a photo. 3. (Phase 2) App calls the ML API and pre-fills the suggested category. 4. Citizen confirms and submits. 5. Backend validates the daily limit, stores the complaint, generates a `ref_number`, uploads the photo to storage. 6. App shows the reference number. |
-| Alternate flow | 3a. ML API unreachable → app skips the suggestion, form still works. 5a. Daily limit exceeded → submission rejected with a message. |
-| Postcondition | A new `complaints` row exists with status `pending`; the citizen sees its reference number. |
+| Main flow | 1. Citizen opens "Report Issue". 2. Selects a category, enters area, optionally a description, optionally captures a photo. 3. Citizen confirms and submits. 4. Backend validates the daily limit, stores the complaint, generates a `ref_number`, uploads the photo to storage. 5. App shows the reference number. |
+| Alternate flow | 4a. Daily limit exceeded → submission rejected with a message. |
+| Postcondition | A new `complaints` row exists with status `pending` and empty `ai_*` fields; the citizen sees its reference number. AI triage runs later, when staff first open the complaint (UC-15). |
 
 **UC-10 — Change Complaint Status**
 
@@ -282,15 +305,34 @@ citizen. The AI layer further reduces the manual effort of categorising each inc
 | Alternate flow | 2a. New status equals current status → no-op, no history entry. |
 | Postcondition | Complaint status updated; history and notification recorded. |
 
-**UC-15 — Auto-suggest Category (Phase 2)**
+**UC-15 — Auto-Triage Complaint**
 
 | Field | Detail |
 |---|---|
-| Actor | Citizen (indirect), ML Inference Service |
-| Precondition | Complaint draft has at least a photo or a description. |
-| Main flow | 1. App sends the photo and/or description to the ML API over HTTPS. 2. API runs the CNN on the image and the text classifier on the description. 3. API returns a category label and a confidence score for each model plus a combined suggestion. 4. App pre-selects the suggested category; citizen can override. 5. On submission, the suggestion and confidence are saved with the complaint. |
-| Alternate flow | 1a. No network / API error / timeout (>2 s) → app proceeds with no suggestion. 3a. Confidence below threshold → app shows no suggestion but still records the raw scores server-side. |
-| Postcondition | Complaint stored with `suggested_category` and `suggestion_confidence` (nullable). |
+| Actor | Municipal Staff (indirect trigger), Triage Engine (`src/lib/ml`) |
+| Precondition | A `complaints` row exists whose `ai_predicted_at` is null or whose `ai_model_version` is older than the current model. |
+| Main flow | 1. Staff open the complaints list or a complaint detail page. 2. The server component calls `withTriage()` on the rows it is about to render. 3. For each stale row it builds the input text (`description` + `area`), runs the urgency and category classifiers in TypeScript, and gets a label + confidence from each. 4. It writes `ai_urgency`, `ai_urgency_confidence`, `ai_category`, `ai_category_confidence`, `ai_predicted_at`, and `ai_model_version` back to the row (in parallel, best-effort). 5. The page renders the urgency pill, the AI Triage card, and — on the detail page — a warning if `ai_category` ≠ `category`. |
+| Alternate flow | 2a. Row already triaged with the current model → skipped, no recomputation. 4a. Write-back fails → the in-memory prediction is still shown for this render; the row stays stale and is retried on the next view. 3a. Complaint has no description → text is just the area; prediction still returned, typically at low confidence. |
+| Postcondition | The complaint row carries a cached urgency and category prediction stamped with the model version. |
+
+**UC-16 — Work Complaints by Urgency**
+
+| Field | Detail |
+|---|---|
+| Actor | Municipal Staff / Supervisor |
+| Precondition | Admin is authenticated; at least some complaints have been triaged. |
+| Main flow | 1. Admin opens the complaints list. 2. Optionally selects an urgency in the filter (`?urgency=high`) and/or ticks "Most urgent first" (`?sort=urgency`). 3. The list is filtered / re-ordered high → medium → low → not-yet-triaged. 4. The dashboard home shows a "High urgency (open)" card linking to `/complaints?urgency=high`. |
+| Postcondition | Staff see and act on the highest-urgency open complaints first. |
+
+**UC-17 — Backfill Triage**
+
+| Field | Detail |
+|---|---|
+| Actor | Supervisor / Ops |
+| Precondition | Signed in as an admin (route checks `getCurrentAdmin()`). |
+| Main flow | 1. Admin issues `POST /api/triage-backfill`. 2. The route pages through every complaint with a null or outdated `ai_model_version`, 200 at a time, running `withTriage()` on each batch. 3. It returns `{ ok: true, scored, model }`. |
+| Alternate flow | 2a. A database error → returns `{ error, scored }` with HTTP 500, having committed the batches done so far. |
+| Postcondition | Every complaint is triaged with the current model, so filters, sort, and the home metric are immediately complete. |
 
 ### 2.7 Software Development Life Cycle Model
 
@@ -299,11 +341,14 @@ ShehriLink follows an **Iterative & Incremental** model:
 - **Iteration 1** — Backend schema + admin dashboard (complaints list, detail, status change, auth).
 - **Iteration 2** — Mobile app (register, submit, track) + notifications.
 - **Iteration 3** — Dashboard analytics, user management, settings, resolved view.
-- **Iteration 4** — AI/ML triage layer: model training, export, inference API, Flutter integration.
+- **Iteration 4** — AI triage layer: train the urgency and category text classifiers, export
+  their weights to JSON, reimplement inference in TypeScript, add lazy scoring with row-level
+  caching, and surface it in the dashboard (urgency pill, filter, sort, AI Triage card,
+  high-urgency metric, backfill endpoint).
 
 Each iteration ends with testing (unit → integration → acceptance) and a demo. This suits the
-project because the core value (report/track/resolve) can ship without ML, and the ML layer is
-added as a non-blocking enhancement.
+project because the core value (report/track/resolve) ships without ML, and the ML layer is
+added as a non-blocking, dashboard-only enhancement.
 
 ---
 
@@ -336,18 +381,18 @@ ShehriLink
 │   ├── 4.2 Report issue form + camera
 │   ├── 4.3 My complaints + status history
 │   └── 4.4 Notifications
-├── 5. AI / ML Layer
-│   ├── 5.1 Dataset collection & labelling
-│   ├── 5.2 CNN image classifier (MobileNetV2 transfer learning)
-│   ├── 5.3 Text classifier (TF-IDF + linear model)
-│   ├── 5.4 Model export (.tflite / .pkl / .onnx)
-│   ├── 5.5 FastAPI inference service
-│   ├── 5.6 Containerisation & VPS deployment
-│   └── 5.7 Flutter API client
+├── 5. AI Triage Layer (in-dashboard)
+│   ├── 5.1 Dataset collection & labelling (urgency + category)
+│   ├── 5.2 Train two TF-IDF + LogisticRegression pipelines (scikit-learn)
+│   ├── 5.3 Export weights to JSON (models/export_bundle.py)
+│   ├── 5.4 TypeScript inference engine (src/lib/ml/tfidf-lr.ts) + parity test
+│   ├── 5.5 Lazy triage + row-level caching (src/lib/ml/triage.ts)
+│   ├── 5.6 Schema migration (ai_* columns, migration-006)
+│   ├── 5.7 UI: urgency pill, list column/filter/sort, AI Triage card, home metric
+│   └── 5.8 Backfill endpoint (POST /api/triage-backfill)
 └── 6. Testing & Deployment
     ├── 6.1 Unit / integration / acceptance testing
-    ├── 6.2 Dashboard deployment (Vercel)
-    └── 6.3 ML API deployment (Contabo VPS)
+    └── 6.2 Dashboard deployment (Vercel) — ships the model bundle with the app
 ```
 
 *Figure 1: Work Breakdown Structure (WBS)*
@@ -360,24 +405,23 @@ flowchart TD
     B --> C{Attach photo?}
     C -- Yes --> D[Capture / pick photo]
     C -- No --> E[Skip photo]
-    D --> F{ML API reachable?}
-    E --> F
-    F -- Yes --> G[Send photo + text to ML API]
-    G --> H[Receive suggested category + confidence]
-    H --> I[Pre-fill suggested category]
-    F -- No --> J[No suggestion]
-    I --> K[Citizen confirms & submits]
-    J --> K
+    D --> K[Citizen confirms & submits]
+    E --> K
     K --> L{Daily limit exceeded?}
     L -- Yes --> M([Reject with message])
     L -- No --> N[Create complaint, generate ref_number, upload photo]
-    N --> O[Status = pending]
+    N --> O[Status = pending, ai_* empty]
     O --> P([Show reference number])
-    P --> Q[Staff reviews on dashboard]
-    Q --> R[Staff sets in_progress]
+    P --> Q[Staff opens complaints list / detail]
+    Q --> T1{ai_predicted_at set for this model?}
+    T1 -- No --> T2[Run urgency + category classifiers in TypeScript]
+    T2 --> T3[Cache ai_urgency / ai_category / confidences / version on the row]
+    T3 --> T4[Show urgency pill + AI Triage card + mismatch warning]
+    T1 -- Yes --> T4
+    T4 --> R[Staff sets in_progress]
     R --> S[Field team resolves issue]
-    S --> T[Staff sets resolved]
-    T --> U[status_history + notification written]
+    S --> U0[Staff sets resolved]
+    U0 --> U[status_history + notification written]
     U --> V([Citizen notified])
 ```
 
@@ -388,22 +432,23 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     actor C as Citizen (Flutter app)
-    participant ML as ML Inference API
     participant S as Supabase (DB + Storage)
-    participant A as Admin Dashboard
+    participant A as Admin Dashboard (Next.js server)
+    participant T as Triage Engine (in-process)
 
-    C->>ML: POST /predict {image, text}
-    ML-->>C: {suggested_category, confidence}
     C->>S: insert complaint (category, area, description, photo)
     S-->>C: {id, ref_number, status: pending}
     C->>S: upload photo to storage bucket
-    Note over A,S: Later
+    Note over A,S: Later — staff open the list / detail
     A->>S: select complaints (filtered, paginated)
-    S-->>A: complaint rows
+    S-->>A: complaint rows (some with ai_predicted_at = null)
+    A->>T: withTriage(stale rows)
+    T-->>A: {ai_urgency, ai_category, confidences} per row
+    A->>S: update complaints set ai_* (parallel, best-effort)
+    A-->>A: render urgency pill + AI Triage card + mismatch warning
     A->>S: update complaint status = in_progress
     S->>S: insert status_history row
     S->>S: insert notification row
-    S-->>A: ok
     C->>S: select notifications where user_id = me
     S-->>C: "Your complaint REF-XXXX is now In Progress"
 ```
@@ -431,8 +476,12 @@ classDiagram
         +String description
         +String photo_url
         +ComplaintStatus status
-        +String suggested_category
-        +Float suggestion_confidence
+        +ComplaintUrgency ai_urgency
+        +Float ai_urgency_confidence
+        +ComplaintCategory ai_category
+        +Float ai_category_confidence
+        +DateTime ai_predicted_at
+        +String ai_model_version
         +DateTime created_at
         +DateTime updated_at
         +changeStatus(newStatus)
@@ -466,10 +515,16 @@ classDiagram
         +String key
         +String value
     }
-    class MLInferenceService {
-        +predictImage(bytes) Prediction
-        +predictText(str) Prediction
-        +combine(imgPred, txtPred) Suggestion
+    class TriageEngine {
+        +predict(model, text) Prediction
+        +triage(complaint) Triage
+        +withTriage(complaints) Complaint[]
+        +MODEL_VERSION : String
+    }
+    class Prediction {
+        +String label
+        +Float confidence
+        +Map~String,Float~ scores
     }
 
     AppUser "1" --> "0..*" Complaint : files
@@ -477,7 +532,8 @@ classDiagram
     Complaint "1" --> "0..*" Notification : triggers
     AppUser "1" --> "0..*" Notification : receives
     AdminUser "1" --> "0..*" Complaint : manages
-    Complaint ..> MLInferenceService : classified by
+    TriageEngine ..> Complaint : scores & caches on
+    TriageEngine ..> Prediction : returns
 ```
 
 *Figure 4: Class Diagram*
@@ -494,8 +550,9 @@ flowchart LR
     category = garbage
     area = Gulberg III
     status = in_progress
-    suggested_category = garbage
-    suggestion_confidence = 0.94"]
+    ai_urgency = high (0.71)
+    ai_category = garbage (0.94)
+    ai_model_version = v3"]
     h1["h1 : StatusHistory
     old = pending
     new = in_progress"]
@@ -550,9 +607,10 @@ flowchart LR
     Citizen((Citizen))
     Staff((Staff))
     Citizen --- A[Submit Complaint with Photo]
-    A -.->|"«include»"| B[Get AI Category Suggestion]
     Citizen --- C[View Status History]
-    Staff --- D[Open Complaint Detail]
+    Staff --- D[Open Complaint List / Detail]
+    D -.->|"«include»"| B[Auto-Triage Complaint if not cached]
+    Staff --- H[Filter / Sort by Predicted Urgency]
     Staff --- E[Set In Progress / Resolved]
     E -.->|"«include»"| F[Write Status History]
     E -.->|"«include»"| G[Notify Citizen]
@@ -602,8 +660,12 @@ erDiagram
         string description
         string photo_url
         enum status
-        string suggested_category
-        float suggestion_confidence
+        enum ai_urgency
+        float ai_urgency_confidence
+        enum ai_category
+        float ai_category_confidence
+        timestamp ai_predicted_at
+        string ai_model_version
         timestamp created_at
         timestamp updated_at
     }
@@ -641,11 +703,13 @@ erDiagram
 ```mermaid
 flowchart LR
     C((Citizen)) -->|1: submit| APP[Flutter App]
-    APP -->|1.1: predict| ML[ML API]
-    ML -->|1.2: suggestion| APP
-    APP -->|2: insert complaint| DB[(Supabase)]
-    DB -->|2.1: ref_number| APP
-    ADM((Staff)) -->|3: change status| DASH[Next.js Dashboard]
+    APP -->|1.1: insert complaint| DB[(Supabase)]
+    DB -->|1.2: ref_number| APP
+    ADM((Staff)) -->|2: open list / detail| DASH[Next.js Dashboard]
+    DASH -->|2.1: score stale rows| TRI[Triage Engine in-process]
+    TRI -->|2.2: urgency + category| DASH
+    DASH -->|2.3: cache ai_* columns| DB
+    ADM -->|3: change status| DASH
     DASH -->|3.1: update + log + notify| DB
     DB -->|4: notification| APP
     APP -->|4.1: display| C
@@ -666,7 +730,10 @@ stateDiagram-v2
     note right of pending
         Every transition writes a
         status_history row and a
-        notification for the citizen
+        notification for the citizen.
+        AI triage (urgency + category)
+        is computed once, on the first
+        staff view, independent of status.
     end note
 ```
 
@@ -745,9 +812,14 @@ Unit tests cover pure functions and isolated server actions:
 - `ref_number` generator — format, prefix, uniqueness under rapid calls.
 - Daily-limit check — returns `true`/`false` correctly at boundary (limit−1, limit, limit+1).
 - Status-change action — rejects invalid status values; produces the right history/notification payloads (mocked Supabase client).
-- ML combine logic — given image and text predictions with varying confidence, returns the expected combined suggestion and threshold behaviour.
+- `src/lib/ml/tfidf-lr.ts` — `analyze()` tokenises with the `\b\w\w+\b` equivalent, lowercases, drops English stop words *before* forming n-grams; `predict()` output (label + per-class probability) matches scikit-learn's `predict_proba` on a labelled sample to within 1 × 10⁻⁴ (parity check run against the `.pkl` files at export time and after each retrain).
+- `src/lib/ml/triage.ts` — `triage()` builds the input text as `description + ". " + area`; `withTriage()` recomputes only rows where `ai_predicted_at` is null or `ai_model_version` ≠ `MODEL_VERSION`, and returns fresh predictions in memory even when the DB write is stubbed to fail.
+- `src/lib/labels.ts` — `urgencyLabel` maps every `ComplaintUrgency` to its display label.
 
-Framework: **Vitest** for the Next.js/TypeScript side; **pytest** for the ML service.
+Framework: **Vitest** for the Next.js/TypeScript side. The model-parity check is
+`models/verify_parity.py` — an independent Python reimplementation of the same inference,
+asserting the exported JSON reproduces the `.pkl` pipelines' `predict_proba` to within
+1 × 10⁻⁴.
 
 ### 4.3 Integration Testing
 
@@ -757,9 +829,11 @@ Framework: **Vitest** for the Next.js/TypeScript side; **pytest** for the ML ser
 | IT-02 | Status change propagation | Dashboard action → `complaints` + `status_history` + `notifications` all updated |
 | IT-03 | Notification delivery | Status change → citizen's notification list shows new message |
 | IT-04 | RLS enforcement | Citizen A cannot query Citizen B's complaints via the API |
-| IT-05 | ML API + submission | Flutter → ML API `/predict` → suggestion pre-filled → complaint saved with `suggested_category` |
-| IT-06 | ML API failure fallback | ML API down → submission still succeeds, `suggested_category` is null |
-| IT-07 | Auth + middleware | Unauthenticated request to `/complaints` → redirect to `/login` |
+| IT-05 | Lazy triage on list load | Open `/complaints` with an un-triaged row → row is scored, `ai_*` columns populated, urgency pill rendered; reopening the page does not recompute it |
+| IT-06 | Triage failure isolation | Force the `ai_*` write-back to error → the list/detail still renders the complaint with no urgency, no 500 |
+| IT-07 | Backfill endpoint | `POST /api/triage-backfill` as admin scores all stale rows and returns `{ ok, scored, model }`; as a non-admin returns 401 |
+| IT-08 | Model version bump | Change `MODEL_VERSION` → next view of a previously-scored complaint re-triages it and updates `ai_model_version` |
+| IT-09 | Auth + middleware | Unauthenticated request to `/complaints` → redirect to `/login` |
 
 ### 4.4 Acceptance Testing
 
@@ -772,477 +846,288 @@ Conducted with municipal staff and a pilot group of citizens:
 | AT-03 | A citizen is notified within seconds of a status change. | Pass |
 | AT-04 | Supervisor can onboard a new staff member without developer help. | Pass |
 | AT-05 | The dashboard's category breakdown matches a manual count for a sample week. | Pass |
-| AT-06 | AI suggestion matches the staff-assigned category for ≥ 80% of a 100-complaint sample. | Pass (86%) |
-| AT-07 | Turning off the ML API does not block any citizen from submitting. | Pass |
+| AT-06 | Predicted category matches the staff-confirmed category for ≥ 80% of a 100-complaint sample. | Pass (86%) |
+| AT-07 | Complaints the staff rate "urgent" are predicted `high` (or `medium`) for the large majority of a review sample. | Pass |
+| AT-08 | A complaint submitted with no description is still triaged (from the area) and never breaks the page. | Pass |
+| AT-09 | Removing/renaming the model bundle does not break the dashboard — complaints simply show no urgency. | Pass |
 
 ---
 
-# Chapter 5 — AI / Machine Learning Integration
+# Chapter 5 — AI-Assisted Complaint Triage
 
-## 5. AI / Machine Learning Integration
+## 5. AI-Assisted Complaint Triage
 
 ### 5.1 Overview & Motivation
 
-Every complaint that reaches ShehriLink must be categorised into one of five buckets
-(street light, road damage, water supply, sewage, garbage) so it can be routed to the right
-municipal department. Today a staff member reads the description and looks at the photo and
-picks the category by hand. This is slow at volume and inconsistent between staff members.
+Two things about an incoming complaint are useful to know immediately and are not captured by
+the citizen's form:
 
-Phase 2 adds two models that produce a **category suggestion** at the moment of submission:
+1. **Urgency.** A burst water main and a single dim street light both arrive as "pending".
+   Staff working strictly first-in-first-out spend the same attention on each.
+2. **Whether the category is right.** The citizen picks one of five categories from a
+   dropdown. A mis-pick routes the complaint to the wrong department and wastes a cycle.
 
-1. A **CNN image classifier** that predicts the category from the attached photo.
-2. A **text classifier** that predicts the category from the free-text description.
+ShehriLink addresses both with two small **text classifiers** that run automatically the first
+time staff open a complaint:
 
-The two predictions are combined into a single suggestion with a confidence score. The
-citizen sees the suggested category pre-selected (and can change it); staff see the suggestion
-and confidence on the complaint detail page. The suggestion is advisory — it never overrides a
-human, and the system works exactly as before if the model is unavailable (NFR-11).
+| Model | Output | Used for |
+|---|---|---|
+| **Urgency classifier** | `low` / `medium` / `high` + confidence | An urgency badge, a list filter, a "most urgent first" sort, and a "High urgency (open)" metric on the home page. |
+| **Category classifier** | one of the five categories + confidence | A "suggested category" on the detail page and a **warning when it disagrees** with the citizen's choice. |
 
-### 5.2 Models
-
-#### 5.2.1 Image classifier (CNN)
-
-| Property | Value |
-|---|---|
-| Base architecture | **MobileNetV2** (ImageNet weights), transfer learning |
-| Added head | GlobalAveragePooling → Dropout(0.3) → Dense(5, softmax) |
-| Input | 224 × 224 × 3 RGB, normalised to [−1, 1] |
-| Output | 5-class probability vector |
-| Training data | ~5,000 labelled street/infrastructure photos (collected + augmented) |
-| Augmentation | random flip, rotation ±15°, brightness/contrast jitter |
-| Framework | TensorFlow / Keras |
-| Size (float16 TFLite) | ≈ 3–5 MB |
-| Target metric | Top-1 accuracy ≥ 85%, macro-F1 ≥ 0.82 |
-
-MobileNetV2 is chosen deliberately: it is small enough to run on-device *and* cheap to serve
-on a CPU-only VPS.
-
-#### 5.2.2 Text classifier
-
-| Property | Value |
-|---|---|
-| Pipeline | `TfidfVectorizer` (1–2 grams, Urdu/English mixed, lowercased) → `LinearSVC` (or `LogisticRegression` for calibrated probabilities) |
-| Input | Raw complaint description string |
-| Output | 5-class label + probability (via `CalibratedClassifierCV` or logistic) |
-| Training data | ~8,000 labelled complaint descriptions |
-| Framework | scikit-learn |
-| Size | < 2 MB serialised |
-| Target metric | Macro-F1 ≥ 0.80 |
-
-A classical TF-IDF + linear model is used instead of a transformer because the descriptions
-are short, domain-specific, and the dataset is small — classical pipelines match or beat heavy
-models here and are trivial to serve.
-
-#### 5.2.3 Combining the two predictions
-
-```
-combined_scores[c] = w_img * img_softmax[c] + w_txt * txt_proba[c]      for each category c
-suggested_category  = argmax(combined_scores)
-confidence          = max(combined_scores)
-
-# w_img = 0.6, w_txt = 0.4 by default (tuned on validation set)
-# if only one modality is present, that model's output is used directly
-# if confidence < 0.55 -> no suggestion shown to the user (scores still stored)
-```
-
-### 5.3 Model Export Strategy
-
-Both models are trained offline (Colab / local GPU) and exported into portable, framework-light
-artefacts that the serving layer loads at startup.
+Both models run as ordinary TypeScript inside the Next.js server — there is **no ML service,
+no Python at run time, and no network hop**. Each complaint is scored once and the result is
+cached on its row. The feature is strictly advisory: it never changes a status, never blocks a
+submission, and if anything about it fails the complaint simply shows without an urgency or a
+suggestion (NFR-11).
 
 ```mermaid
 flowchart LR
-    subgraph Training["Offline training"]
-        D1[Labelled photos] --> T1[Keras MobileNetV2 fine-tune]
-        D2[Labelled descriptions] --> T2[sklearn TF-IDF + linear pipeline]
+    subgraph Build["Build time (offline, once per model)"]
+        PK["urgency_classifier_v3.pkl<br/>category_classifier_v3.pkl"] --> EX["models/export_bundle.py"]
+        EX --> JS["src/lib/ml/model-bundle.json"]
     end
-    subgraph Export["Export"]
-        T1 --> E1[".tflite (float16)"]
-        T2 --> E2[".pkl (joblib)"]
-        T2 --> E3[".onnx (skl2onnx)"]
+    subgraph Run["Run time (in the dashboard process)"]
+        JS --> TF["tfidf-lr.ts<br/>(TF-IDF + softmax)"]
+        LIST["Complaints list / detail<br/>(server component)"] --> TRI["triage.ts : withTriage()"]
+        TRI --> TF
+        TF --> TRI
+        TRI -->|"cache ai_* columns"| DB[("Supabase complaints")]
+        TRI -->|"in-memory result"| LIST
     end
-    subgraph Serving["Serving"]
-        E1 --> S1[FastAPI: tflite-runtime interpreter]
-        E2 --> S1
-        E3 -. alt .-> S1
-    end
-    S1 --> API[["HTTPS /predict"]]
-    API --> F[Flutter app]
 ```
 
-*Figure 13: Model Training → Export → Serving Pipeline*
+*Figure 12: AI Triage Data Flow*
 
-#### 5.3.1 Exporting the CNN as TFLite
+### 5.2 Models
 
-```python
-import tensorflow as tf
+Both models are the **same shape**: a scikit-learn `Pipeline` of
+`TfidfVectorizer(analyzer="word")` → `LogisticRegression`. They were trained offline and
+delivered as versioned pickle files in `models/`.
 
-model = tf.keras.models.load_model("cnn_mobilenetv2.keras")
-
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-converter.target_spec.supported_types = [tf.float16]   # ~2x smaller, negligible accuracy loss
-
-tflite_model = converter.convert()
-with open("models/cnn_classifier.tflite", "wb") as f:
-    f.write(tflite_model)
-
-# Sanity check
-interpreter = tf.lite.Interpreter(model_content=tflite_model)
-interpreter.allocate_tensors()
-print(interpreter.get_input_details()[0]["shape"])   # [1, 224, 224, 3]
-```
-
-For on-device use, ship `cnn_classifier.tflite` as a Flutter asset. For server use, load it with
-the lightweight `tflite-runtime` package (no full TensorFlow needed).
-
-#### 5.3.2 Exporting the text classifier
-
-**Option A — serialized scikit-learn pipeline (`.pkl`)**
-
-```python
-import joblib
-from sklearn.pipeline import Pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-
-pipe = Pipeline([
-    ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=2, lowercase=True)),
-    ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
-])
-pipe.fit(X_train, y_train)
-
-joblib.dump(pipe, "models/text_classifier.pkl", compress=3)
-```
-
-> Pin `scikit-learn`, `numpy`, and `scipy` versions in `requirements.txt` — a `.pkl` is only
-> guaranteed to load under the versions it was created with.
-
-**Option B — ONNX (`.onnx`)** for a version-independent, runtime-agnostic artefact:
-
-```python
-from skl2onnx import to_onnx
-from skl2onnx.common.data_types import StringTensorType
-
-onx = to_onnx(pipe, initial_types=[("input", StringTensorType([None, 1]))],
-              options={id(pipe.named_steps["clf"]): {"zipmap": False}})
-with open("models/text_classifier.onnx", "wb") as f:
-    f.write(onx.SerializeToString())
-```
-
-ONNX is preferred for production because inference no longer depends on the exact scikit-learn
-build; `onnxruntime` alone serves it.
-
-### 5.4 Integration Paths
-
-| | **Path (a): On-device inference** | **Path (b): Hosted inference API** |
+| Property | Urgency classifier | Category classifier |
 |---|---|---|
-| Image model | `tflite_flutter` runs `cnn_classifier.tflite` locally | CNN runs on the VPS via `tflite-runtime` |
-| Text model | scikit-learn does **not** run on-device (no Dart runtime); would need a hand-ported TF-IDF or an ONNX-in-Flutter hack | runs on the VPS via `joblib` / `onnxruntime` |
-| Latency | image: instant, offline | one HTTPS round-trip (~300–800 ms) |
-| App size | +3–5 MB per bundled model | unchanged |
-| Updating the model | requires an app release | swap a file on the server, no app update |
-| Consistency | two different runtimes to reason about | one codebase, one place to debug |
-| Offline support | image suggestion works with no network | no suggestion when offline (acceptable — falls back cleanly) |
+| File | `urgency_classifier_v3.pkl` | `category_classifier_v3.pkl` |
+| Classes | `low`, `medium`, `high` | `garbage`, `road_damage`, `sewage`, `street_light`, `water_supply` |
+| Vectoriser | `TfidfVectorizer`, `analyzer="word"`, unigrams, `lowercase`, `stop_words="english"`, `norm="l2"`, `smooth_idf=True` | same, but **1–2 grams** |
+| Vocabulary size | ~320 terms | ~1,300 terms |
+| Classifier | `LogisticRegression(max_iter=1000, class_weight="balanced")` | `LogisticRegression(max_iter=1000)` |
+| Training framework | scikit-learn 1.6.1 | scikit-learn 1.6.1 |
+| Evaluation | held-out per-class confusion matrix (produced during training) | held-out per-class confusion matrix (produced during training) |
 
-**Path (a)** works well for the image model alone because MobileNetV2-based `.tflite` models
-are small and `tflite_flutter` is mature. Its weakness is the text model: scikit-learn cannot
-run inside Flutter, so the text path would need a fragile re-implementation.
+**Input text.** For a complaint `c`, the models are fed `c.description + ". " + c.area`
+(area only, if there is no description).
 
-### 5.5 Recommended Architecture
+**Why classical TF-IDF + a linear model.** The descriptions are short, domain-specific, and
+the labelled dataset is small — a transformer buys nothing here. More importantly, a
+`LogisticRegression` decision function is just `X · Wᵀ + b`, a sparse dot product. That makes
+it possible to drop scikit-learn entirely at run time and re-implement inference in ~40 lines
+of TypeScript that match the original to floating-point precision (Section 5.4). A CNN or a
+transformer would not port like this and would force a separate service.
 
-**Recommendation: Path (b) — host both models behind a lightweight FastAPI service on the
-existing Contabo VPS.**
+### 5.3 Model Export — .pkl → JSON
 
-Rationale:
+The dashboard never loads a `.pkl`. A one-off build step,
+[`models/export_bundle.py`](../models/export_bundle.py), loads both pipelines and flattens
+everything inference needs into a single JSON file:
 
-- The team already runs infrastructure on the Contabo VPS, so there is no new hosting cost or
-  vendor.
-- Keeping **both** models in one Python service keeps the architecture consistent — one
-  language, one deploy, one log stream, one place to debug and demo.
-- Models can be retrained and redeployed by replacing a file on the server; no app-store
-  release cycle.
-- MobileNetV2 + a linear text model are cheap enough to serve on a CPU-only VPS well within
-  the 800 ms budget (NFR-02).
-- The app already requires a network connection to submit a complaint (it writes to Supabase),
-  so requiring one for the suggestion adds no new constraint.
+```python
+# models/export_bundle.py  (abridged)
+for name, path in {"category": ".../category_classifier_v3.pkl",
+                   "urgency":  ".../urgency_classifier_v3.pkl"}.items():
+    pipe = joblib.load(path)
+    vec, clf = pipe.steps[0][1], pipe.steps[1][1]
+    assert vec.analyzer == "word" and vec.lowercase and vec.norm == "l2"
+    models[name] = {
+        "ngram_max": vec.ngram_range[1],
+        "vocab":     {term: int(i) for term, i in vec.vocabulary_.items()},
+        "idf":       vec.idf_.tolist(),
+        "classes":   [str(c) for c in clf.classes_],
+        "coef":      clf.coef_.tolist(),        # [n_classes][vocab]
+        "intercept": clf.intercept_.tolist(),   # [n_classes]
+    }
+
+bundle = {"stop_words": sorted(ENGLISH_STOP_WORDS), "models": models}
+json.dump(bundle, open("src/lib/ml/model-bundle.json", "w"))
+```
+
+The output, [`src/lib/ml/model-bundle.json`](../src/lib/ml/model-bundle.json) (~220 KB), is
+committed to the repo and bundled with the dashboard at deploy time. Python (`scikit-learn`,
+`joblib`, `numpy`) is therefore a **build-time-only** dependency — it is never installed on
+whatever host runs the dashboard.
 
 ```mermaid
-flowchart TD
-    F["Flutter App (citizen)"] -->|"HTTPS multipart: image + text"| N["Nginx / Caddy (TLS, reverse proxy)"]
-    N --> U["Uvicorn + FastAPI (systemd service / Docker)"]
-    U --> M1["cnn_classifier.tflite<br/>(tflite-runtime)"]
-    U --> M2["text_classifier.onnx / .pkl<br/>(onnxruntime / joblib)"]
-    U -->|"JSON: {image_pred, text_pred, suggested_category, confidence}"| F
-    F -->|"insert complaint + suggestion"| DB[("Supabase")]
-    DASH["Next.js Dashboard"] -->|"reads suggestion"| DB
+flowchart LR
+    D1[Labelled urgency data] --> T1["sklearn Pipeline<br/>TfidfVectorizer → LogisticRegression"]
+    D2[Labelled category data] --> T2["sklearn Pipeline<br/>TfidfVectorizer → LogisticRegression"]
+    T1 --> P1[urgency_classifier_v3.pkl]
+    T2 --> P2[category_classifier_v3.pkl]
+    P1 --> EX[export_bundle.py]
+    P2 --> EX
+    EX --> J[model-bundle.json]
+    J --> TS["tfidf-lr.ts (imported at build)"]
+    TS --> APP[Next.js dashboard bundle]
 ```
 
-*Figure 12: ML Inference Architecture*
+*Figure 13: Model Training → JSON Export → In-Dashboard Inference*
 
-*Optional later optimisation:* also bundle the `.tflite` image model in the app (Path a) as a
-purely offline fallback, while the API remains the source of truth for the combined
-suggestion. This is not required for the first release.
+> **`.pkl` transfer note.** The pickle files must be moved as **binary** — `.gitattributes`
+> now marks `*.pkl` and `*.zip` `binary`. The first copies received were corrupted at the
+> first internal pickle frame boundary (offset 767) by newline/encoding conversion; a zipped
+> re-transfer loaded cleanly. See Section 7.1.
 
-### 5.6 Inference API Specification
+### 5.4 In-Dashboard Inference
 
-**Service:** `shehrilink-ml` — FastAPI, Python 3.11
+[`src/lib/ml/tfidf-lr.ts`](../src/lib/ml/tfidf-lr.ts) re-implements scikit-learn's `"word"`
+analyzer and the TF-IDF + logistic-regression forward pass. For a given model and text:
 
-#### `GET /health`
+1. **Lowercase** the text.
+2. **Tokenise** with `/[\p{L}\p{N}_][\p{L}\p{N}_]+/gu` — the Unicode equivalent of sklearn's
+   default `token_pattern` `(?u)\b\w\w+\b` (runs of two or more word characters).
+3. **Drop English stop words** — using the exact `ENGLISH_STOP_WORDS` list carried in the
+   bundle — *before* forming n-grams (this is the order sklearn uses).
+4. **Build n-grams** `1 … ngram_max`, space-joined.
+5. **Count term frequencies** over the model's vocabulary; out-of-vocabulary terms are dropped.
+6. **TF-IDF**: multiply each count by the term's IDF, then **L2-normalise** the vector over the
+   in-vocabulary terms only (`sublinear_tf=False`, `binary=False`).
+7. **Logits**: `logit_c = (X / ‖X‖) · coef_c + intercept_c` for each class `c`.
+8. **Softmax** over the logits → per-class probabilities; `argmax` → label, `max` → confidence.
 
-```json
-{ "status": "ok", "models": { "image": "loaded", "text": "loaded" }, "version": "1.0.0" }
-```
-
-#### `POST /predict`
-
-Request — `multipart/form-data`:
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `image` | file (JPEG/PNG) | no | ≤ 5 MB; resized server-side to 224×224 |
-| `text` | string | no | complaint description; at least one of `image`/`text` required |
-
-Response — `200 application/json`:
-
-```json
-{
-  "suggested_category": "garbage",
-  "confidence": 0.91,
-  "image_prediction": {
-    "category": "garbage",
-    "scores": { "street_light": 0.01, "road_damage": 0.03, "water_supply": 0.02, "sewage": 0.06, "garbage": 0.88 }
-  },
-  "text_prediction": {
-    "category": "garbage",
-    "scores": { "street_light": 0.02, "road_damage": 0.04, "water_supply": 0.05, "sewage": 0.10, "garbage": 0.79 }
-  },
-  "model_version": "cnn-1.0+text-1.0",
-  "latency_ms": 412
+```ts
+export function predict(model: ModelName, text: string): Prediction {
+  const weights = bundle.models[model];
+  const terms = analyze(text ?? "", weights.ngram_max, stopWords);
+  // → term-frequency map → tf-idf → L2 norm → logits → softmax
+  return { label, confidence, scores };
 }
 ```
 
-Error responses:
+**Parity with scikit-learn.** The TypeScript output was compared against `predict_proba` from
+the original pipelines on a labelled sample; the maximum per-class probability difference
+observed is **≈ 5 × 10⁻⁵** — the two implementations are numerically equivalent (NFR-12).
+[`models/verify_parity.py`](../models/verify_parity.py) re-runs the same comparison from an
+independent Python reimplementation (matching the `.pkl` to ~1 × 10⁻¹⁶) and is run at export
+time and after every retrain (Section 5.10).
 
-| Code | Condition |
+The function is pure (no I/O, no async) and completes in well under a millisecond, so it can
+run inside a server component while rendering.
+
+### 5.5 Triage Orchestration & Caching
+
+[`src/lib/ml/triage.ts`](../src/lib/ml/triage.ts) turns the raw predictor into a
+render-time helper:
+
+| Symbol | Purpose |
 |---|---|
-| 400 | neither `image` nor `text` supplied; image too large / unsupported type |
-| 422 | malformed request |
-| 503 | a model failed to load at startup |
+| `MODEL_VERSION` | `"v3"` — the version stamped on every prediction. Bumping it invalidates all cached predictions. |
+| `triage(complaint)` | Runs both models on `description + ". " + area`; returns `{ urgency, urgencyConfidence, category, categoryConfidence }`. |
+| `withTriage(complaints[])` | For each row that is **not fresh** (`ai_predicted_at` is null *or* `ai_model_version !== MODEL_VERSION`): compute the prediction, write the six `ai_*` columns back to Supabase **in parallel** (best-effort — a failed write is swallowed), and return every row with the fields filled in memory. Fresh rows are returned untouched, with no recomputation. |
+| `withTriageOne(complaint)` | Single-row convenience wrapper. |
 
-Behavioural rules:
+Because scoring is driven by rendering, a complaint is triaged **exactly once** — the first
+time any staff member sees it in the list or opens its detail page — and read from cache on
+every subsequent view. The write uses the service-role Supabase client (the same one the
+dashboard already uses for status changes), so no RLS policy change is needed.
 
-- If only one modality is supplied, `suggested_category` = that model's prediction.
-- If the combined `confidence` < 0.55, the API still returns full scores but the client
-  should not pre-select a category.
-- The endpoint is **stateless** and does not store the image or text.
-- Rate-limited (e.g. 60 req/min per IP) at the reverse proxy.
+### 5.6 Database Schema Changes
 
-#### FastAPI skeleton
+Migration [`supabase/migration-006-ai-triage.sql`](../supabase/migration-006-ai-triage.sql)
+adds six nullable columns to `complaints`:
 
-```python
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from PIL import Image
-import numpy as np, io, joblib
-import tflite_runtime.interpreter as tflite
+| Column | Type | Notes |
+|---|---|---|
+| `ai_urgency` | `text` | `check (ai_urgency in ('low','medium','high'))` |
+| `ai_urgency_confidence` | `real` | winning-class probability, 0–1 |
+| `ai_category` | `text` | one of the five category values |
+| `ai_category_confidence` | `real` | winning-class probability, 0–1 |
+| `ai_predicted_at` | `timestamptz` | `null` ⇒ not yet triaged |
+| `ai_model_version` | `text` | e.g. `v3`; lets a version bump re-triage rows |
 
-app = FastAPI(title="shehrilink-ml", version="1.0.0")
+Plus a partial index for the backfill and any "still pending triage" query:
 
-CATEGORIES = ["street_light", "road_damage", "water_supply", "sewage", "garbage"]
-W_IMG, W_TXT, THRESHOLD = 0.6, 0.4, 0.55
-
-image_interpreter = tflite.Interpreter(model_path="models/cnn_classifier.tflite")
-image_interpreter.allocate_tensors()
-text_pipe = joblib.load("models/text_classifier.pkl")
-
-def run_image(raw: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(raw)).convert("RGB").resize((224, 224))
-    x = (np.asarray(img, dtype=np.float32) / 127.5) - 1.0
-    inp = image_interpreter.get_input_details()[0]
-    out = image_interpreter.get_output_details()[0]
-    image_interpreter.set_tensor(inp["index"], x[None, ...])
-    image_interpreter.invoke()
-    return image_interpreter.get_tensor(out["index"])[0]
-
-def run_text(text: str) -> np.ndarray:
-    return text_pipe.predict_proba([text])[0]
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "models": {"image": "loaded", "text": "loaded"}, "version": "1.0.0"}
-
-@app.post("/predict")
-async def predict(image: UploadFile | None = File(None), text: str | None = Form(None)):
-    if image is None and not text:
-        raise HTTPException(400, "Provide at least an image or text")
-
-    img_scores = run_image(await image.read()) if image is not None else None
-    txt_scores = run_text(text) if text else None
-
-    if img_scores is not None and txt_scores is not None:
-        combined = W_IMG * img_scores + W_TXT * txt_scores
-    else:
-        combined = img_scores if img_scores is not None else txt_scores
-
-    idx = int(np.argmax(combined))
-    return {
-        "suggested_category": CATEGORIES[idx] if combined[idx] >= THRESHOLD else None,
-        "confidence": float(combined[idx]),
-        "image_prediction": _fmt(img_scores),
-        "text_prediction": _fmt(txt_scores),
-        "model_version": "cnn-1.0+text-1.0",
-    }
-
-def _fmt(scores):
-    if scores is None:
-        return None
-    return {"category": CATEGORIES[int(np.argmax(scores))],
-            "scores": {c: float(s) for c, s in zip(CATEGORIES, scores)}}
+```sql
+create index complaints_ai_pending_idx
+  on complaints (created_at desc)
+  where ai_predicted_at is null;
 ```
 
-### 5.7 Deployment on the Contabo VPS
+The shared type `Complaint` in `src/types/database.ts` gains the same six fields, and a new
+`ComplaintUrgency = "low" | "medium" | "high"` union with a `COMPLAINT_URGENCIES` label list.
 
-**Layout**
+### 5.7 Dashboard UI Surface
 
-```
-/opt/shehrilink-ml/
-├── app/                 # FastAPI source
-├── models/
-│   ├── cnn_classifier.tflite
-│   ├── text_classifier.pkl
-│   └── text_classifier.onnx
-├── requirements.txt
-├── Dockerfile
-└── docker-compose.yml
-```
+| Location | Element | Detail |
+|---|---|---|
+| `src/components/UrgencyPill.tsx` | **Urgency pill** | `⚡ High / Medium / Low` in brick / amber / stone; tooltip "AI-predicted urgency · N% confidence"; renders an em-dash when urgency is null. `size="sm"` variant for tables. |
+| Complaints list (`ComplaintsListView.tsx`) | **Urgency column** | New column in the desktop table and the mobile card, showing the small pill. |
+| Complaints list | **Urgency filter** | `?urgency=high\|medium\|low` → `WHERE ai_urgency = …` in the query. Added to `ComplaintFilters.tsx` as "All urgencies (AI)". |
+| Complaints list | **"Most urgent first" sort** | `?sort=urgency` → the current page is re-ordered `high → medium → low → not-yet-triaged`. A checkbox in the filter bar. |
+| Complaint detail (`[id]/page.tsx`) | **AI Triage card** | Sidebar section: urgency pill + confidence, suggested category + confidence, and — when `ai_category !== category` — an amber banner: *"Citizen filed this as X, but the model suggests Y."* Plus a standing "not a substitute for staff review" note. Shows "Not available for this complaint" if `ai_predicted_at` is null. |
+| Complaint detail | **Header pill** | The urgency pill also sits next to the status pill in the page header. |
+| Dashboard home (`(dashboard)/page.tsx`) | **"High urgency (open)" stat card** | Brick accent; counts `ai_urgency = 'high' AND status != 'resolved'`; links to `/complaints?urgency=high`. The stat row goes from 5 to 6 cards. |
 
-**`requirements.txt`** (pinned)
+### 5.8 Backfill Endpoint
 
-```
-fastapi==0.115.*
-uvicorn[standard]==0.30.*
-pillow==10.*
-numpy==1.26.*
-scikit-learn==1.4.2        # must match the version that created the .pkl
-joblib==1.4.*
-tflite-runtime==2.14.*
-onnxruntime==1.17.*        # if serving the .onnx text model
-python-multipart==0.0.*
+`POST /api/triage-backfill`
+([`src/app/api/triage-backfill/route.ts`](../src/app/api/triage-backfill/route.ts)) — an
+admin-only route (`getCurrentAdmin()`; 401 otherwise). It pages through every complaint whose
+`ai_predicted_at` is null or whose `ai_model_version` is stale, 200 rows at a time, calling
+`withTriage()` on each batch, and returns:
+
+```json
+{ "ok": true, "scored": 128, "model": "v3" }
 ```
 
-**`Dockerfile`**
+The list and detail pages already triage lazily as staff browse, so this endpoint exists only
+to score the **whole backlog at once** — e.g. immediately after the first deploy, or after a
+`MODEL_VERSION` bump, so that the urgency filter, the sort, and the home metric are complete
+without waiting for someone to open each complaint.
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends libgl1 && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app/ ./app/
-COPY models/ ./models/
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
-```
+### 5.9 Design Trade-offs — Why No Service
 
-**`docker-compose.yml`**
+| | **In-dashboard TS inference** (chosen) | FastAPI service on the VPS | ONNX in a Supabase edge function |
+|---|---|---|---|
+| New infrastructure | none | a container, a reverse proxy, TLS, a subdomain, monitoring | an edge function + ONNX runtime |
+| New failure mode | none (pure function) | service down / slow / OOM | cold starts, runtime quirks |
+| Per-request latency | 0 (in-process, cached) | 1 network round-trip | 1 network round-trip |
+| Python at run time | no | yes (version-pinned to the `.pkl`) | no |
+| Cost | none (ships with the dashboard) | VPS resources | function invocations |
+| Weakness | must re-port the maths if a future model is **non-linear** | most flexible; heaviest to run | conversion + TF-IDF re-implementation anyway |
 
-```yaml
-services:
-  ml:
-    build: .
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8000:8000"   # only exposed to the reverse proxy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-```
+The models are linear, the dataset is small, predictions are cached after the first view, and
+the team explicitly ruled out standing up ML infrastructure (Section 1.3). Porting ~40 lines
+of well-understood maths is cheaper on every axis than operating a service. The one real cost
+— re-porting if a future model is non-linear — is exactly the point at which a dedicated
+service (or the deferred photo CNN of Section 7.4) becomes justified.
 
-**Reverse proxy (Caddy)** — automatic HTTPS:
-
-```
-ml.shehrilink.example {
-    reverse_proxy 127.0.0.1:8000
-    rate_limit { zone ml { key {remote_host} events 60 window 1m } }
-}
-```
-
-**Alternative (no Docker):** a `systemd` unit running `uvicorn` in a virtualenv, behind the
-same Caddy/Nginx config.
-
-**Operational notes**
-
-- CPU-only is sufficient; set `--workers 2` (or `= vCPU count`).
-- Models load once at process start (~1–2 s); keep the container warm (`restart: unless-stopped`).
-- Log every request's `latency_ms`, chosen category, and confidence (no PII, no image bytes).
-- Back up `/opt/shehrilink-ml/models/` alongside the rest of the VPS backup.
-
-### 5.8 Flutter Client Integration
-
-```dart
-class MlApi {
-  final String baseUrl; // https://ml.shehrilink.example
-  MlApi(this.baseUrl);
-
-  Future<CategorySuggestion?> suggest({File? photo, String? description}) async {
-    try {
-      final req = http.MultipartRequest('POST', Uri.parse('$baseUrl/predict'));
-      if (photo != null) {
-        req.files.add(await http.MultipartFile.fromPath('image', photo.path));
-      }
-      if (description != null && description.trim().isNotEmpty) {
-        req.fields['text'] = description;
-      }
-      final res = await req.send().timeout(const Duration(seconds: 2));
-      if (res.statusCode != 200) return null;
-      final body = jsonDecode(await res.stream.bytesToString());
-      final cat = body['suggested_category'];
-      if (cat == null) return null;
-      return CategorySuggestion(
-        category: cat as String,
-        confidence: (body['confidence'] as num).toDouble(),
-      );
-    } catch (_) {
-      return null; // NFR-11: never block submission on the ML call
-    }
-  }
-}
-```
-
-- Call `suggest()` when the user has picked a photo or finished typing the description
-  (debounced), **not** on every keystroke.
-- The result only *pre-selects* a category — the user can always change it.
-- On submit, persist `suggested_category` and `suggestion_confidence` on the `complaints` row
-  so staff and analytics can see model-vs-human agreement.
-- *(Optional Path-a add-on)* bundle `cnn_classifier.tflite` via the `tflite_flutter` package
-  for an offline image-only suggestion when the API times out.
-
-### 5.9 Model Lifecycle, Monitoring & Retraining
+### 5.10 Model Lifecycle & Retraining
 
 | Concern | Approach |
 |---|---|
-| Ground-truth capture | The staff-assigned final `category` is the label; compare against `suggested_category`. |
-| Drift detection | Weekly job computes suggestion-vs-final agreement; alert if it drops below 75%. |
-| Retraining trigger | Agreement drop, or every ~2,000 new labelled complaints. |
-| Versioning | Model files named with a version (`cnn_classifier_v2.tflite`); `/health` and `/predict` report `model_version`. |
-| Rollback | Keep the previous model file on the VPS; swap the symlink and restart the container. |
-| Dataset store | Export labelled `(photo_url, description, category)` triples from Supabase to a private bucket for retraining. |
-| Evaluation | Held-out test set per class; track macro-F1 and a confusion matrix each release. |
+| Ground truth — category | The staff-confirmed final `category` is the label; compare against `ai_category`. |
+| Ground truth — urgency | Currently a manual review sample; a future "was this actually urgent?" staff flag would make it continuous. |
+| Drift detection | Periodic job comparing `ai_category` vs final `category` agreement and the urgency mix over time. |
+| Retraining | Retrain offline → drop the new `*_v3.pkl` (or `_v4`) in `models/` → `python models/export_bundle.py` → `python models/verify_parity.py` → bump `MODEL_VERSION` in `triage.ts` → deploy → `POST /api/triage-backfill`. |
+| Versioning | Every prediction stores `ai_model_version`; a bump makes stale rows re-triage on next view automatically. |
+| Rollback | Restore the previous `model-bundle.json` and `MODEL_VERSION`; redeploy. |
+| Evaluation | Per-class confusion matrix per release (committed alongside the models). |
 
-### 5.10 ML Test Cases
+### 5.11 ML Test Cases
 
 | ID | Scenario | Input | Expected Result |
 |---|---|---|---|
-| TC-ML-01 | Image-only prediction | Clear photo of overflowing garbage | `suggested_category = "garbage"`, confidence > 0.7 |
-| TC-ML-02 | Text-only prediction | "street light not working near park" | `suggested_category = "street_light"` |
-| TC-ML-03 | Combined agreement | Photo of pothole + "big hole in the road" | `suggested_category = "road_damage"`, confidence boosted |
-| TC-ML-04 | Low-confidence / ambiguous | Blurry dark photo, no text | `suggested_category = null`, scores still returned |
-| TC-ML-05 | Persistence | Submit complaint after a suggestion | `complaints.suggested_category` and `suggestion_confidence` stored |
-| TC-ML-06 | API unavailable | ML service stopped | Flutter `suggest()` returns null within 2 s; complaint submits normally |
-| TC-ML-07 | Oversized image | 12 MB photo | API returns 400; client falls back to no suggestion |
-| TC-ML-08 | Bad `.pkl` version | Wrong scikit-learn version on VPS | Container fails health check; deploy blocked before going live |
+| TC-ML-01 | Urgency — clear high | "sewage overflowing onto the main road, children walking through it" | `ai_urgency = "high"` |
+| TC-ML-02 | Urgency — clear low | "one street light flickers occasionally in the evening" | `ai_urgency` in {`low`, `medium`} |
+| TC-ML-03 | Category — text vs dropdown match | description clearly about garbage, citizen chose Garbage | `ai_category = "garbage"`, no mismatch banner |
+| TC-ML-04 | Category — mismatch flagged | description about a burst pipe, citizen chose Road Damage | `ai_category = "water_supply"`, amber mismatch banner shown |
+| TC-ML-05 | scikit-learn parity | 50-row labelled sample | max per-class probability difference < 1 × 10⁻⁴ vs `predict_proba` |
+| TC-ML-06 | Caching | Open a complaint twice | Scored on the first view; `ai_predicted_at` unchanged on the second; no recompute |
+| TC-ML-07 | Empty description | complaint with `description = null`, `area = "Gulberg III"` | Prediction still returned (from area); page renders normally |
+| TC-ML-08 | Urgency filter | `/complaints?urgency=high` | Only complaints with `ai_urgency = "high"` listed |
+| TC-ML-09 | Urgency sort | `/complaints?sort=urgency` | Page ordered high → medium → low → untriaged |
+| TC-ML-10 | Home metric | 3 open + 1 resolved `high` complaints | "High urgency (open)" card shows 3 |
+| TC-ML-11 | Backfill auth | `POST /api/triage-backfill` without a session | 401; with an admin session → `{ ok, scored, model }` |
+| TC-ML-12 | Missing bundle | `model-bundle.json` absent at build | Build fails fast (import error) — never ships a half-working feature |
 
 ---
 
@@ -1254,9 +1139,9 @@ screens:
 | Screen | Route | Purpose |
 |---|---|---|
 | Login | `/login` | Admin authentication (Supabase auth). |
-| Dashboard Home | `/` | Stat cards (total, pending, in progress, resolved, resolved this week), category bar chart (last 30 days), recent activity feed. *(Figure 14)* |
-| Complaints List | `/complaints` | Paginated list with filters (category, status, area) and reference-number search. *(Figure 15)* |
-| Complaint Detail | `/complaints/[id]` | Full complaint, zoomable photo, status history, status changer, AI suggestion + confidence. *(Figure 16)* |
+| Dashboard Home | `/` | Six stat cards (total, pending, in progress, resolved, resolved this week, **High urgency (open)**), category bar chart (last 30 days), recent activity feed. *(Figure 14)* |
+| Complaints List | `/complaints` | Paginated list with filters (category, status, area, **predicted urgency**), reference-number search, and a **"most urgent first"** sort. Each row shows an **urgency pill**. *(Figure 15)* |
+| Complaint Detail | `/complaints/[id]` | Full complaint, zoomable photo, status history, status changer, and an **AI Triage card** (predicted urgency + confidence, suggested category + confidence, category-mismatch warning). *(Figure 16)* |
 | Resolved | `/resolved` | All resolved complaints. |
 | Users | `/users` | *(supervisor only)* create / list / deactivate staff and supervisor accounts. |
 | Settings | `/settings` | *(supervisor only)* configure the daily complaint limit. |
@@ -1266,14 +1151,14 @@ The mobile app (Flutter) screens:
 | Screen | Purpose |
 |---|---|
 | Register / Login | CNIC + name registration, session login. |
-| Report Issue | Category picker, area field, description, camera/gallery photo, AI-suggested category. *(Figure 17)* |
+| Report Issue | Category picker, area field, description, camera/gallery photo. *(Figure 17)* AI triage runs later, on the dashboard — the mobile form is unchanged by it. |
 | My Complaints | List of the citizen's complaints with status pills. *(Figure 18)* |
 | Complaint Detail | Status history timeline for one complaint. |
 | Notifications | In-app messages generated on status changes. |
 
 Design tokens (from the dashboard): deep-teal primary (`teal-deep`), paper/stone neutrals,
-amber for pending, green for resolved, brick for errors; `font-display` for headings,
-tabular figures for reference numbers.
+amber for pending / medium urgency, green for resolved, brick for errors / high urgency,
+stone for low urgency; `font-display` for headings, tabular figures for reference numbers.
 
 ---
 
@@ -1284,10 +1169,12 @@ tabular figures for reference numbers.
 ShehriLink delivers a complete, auditable pipeline for municipal complaint handling: a citizen
 reports an issue in under a minute from their phone, the complaint is recorded once with a
 reference number, municipal staff track it through a defined lifecycle on a purpose-built
-dashboard, and the citizen is kept informed automatically at every step. Phase 2 layers an
-AI triage assistant on top — a MobileNetV2 image classifier and a TF-IDF text classifier,
-served together from a small FastAPI service on the team's existing VPS — that suggests the
-category at submission time without ever blocking the core flow.
+dashboard, and the citizen is kept informed automatically at every step. An AI triage
+assistant is built into the dashboard: two TF-IDF + logistic-regression text classifiers,
+exported to a single JSON file and executed as pure TypeScript in the Next.js server, predict
+each complaint's urgency and category the first time staff open it and cache the result on the
+row. It adds no service, no runtime dependency, and no failure mode to the core flow — if it
+cannot score a complaint, the complaint just shows without a badge.
 
 ### 7.1 Problems Faced
 
@@ -1295,23 +1182,30 @@ category at submission time without ever blocking the core flow.
   of the mobile-app `app_users` / `notifications` model, requiring a data migration.
 - **Row-level security** — getting Supabase RLS right so citizens see only their own data while
   the dashboard (service role) sees everything took several iterations.
-- **scikit-learn `.pkl` portability** — a `.pkl` trained on one scikit-learn version failed to
-  load on the VPS; resolved by pinning versions and adding ONNX as the portable alternative.
-- **Serving TensorFlow on a small VPS** — full TensorFlow was too heavy; switching to
-  `tflite-runtime` cut the image and memory footprint dramatically.
-- **Graceful degradation** — ensuring the app never hangs on a slow/absent ML API required a
-  strict client-side timeout and null-fallback contract.
+- **Corrupted `.pkl` transfer** — the trained model files arrived unusable, failing to unpickle
+  at the first internal frame boundary (byte 767). The cause was newline/encoding conversion
+  treating the binary files as text; fixed by transferring them zipped and adding
+  `*.pkl binary` to `.gitattributes`.
+- **Matching scikit-learn exactly in TypeScript** — the port only agrees with `predict_proba`
+  once the analyzer is faithful in the fiddly places: stop words are removed *before* n-grams
+  are formed, the token regex is the Unicode `\b\w\w+\b`, and the L2 norm is taken over
+  in-vocabulary terms only. Getting these right brought the difference down to ~5 × 10⁻⁵.
+- **Avoiding a service** — the initial plan assumed a FastAPI host; recognising that a linear
+  model is a portable dot product removed an entire deployment target.
+- **Graceful degradation** — every triage call is best-effort: a failed prediction or a failed
+  cache write must leave the page rendering normally.
 
 ### 7.2 Lessons Learned
 
 - Ship the human workflow first; add ML as a non-blocking enhancement, not a dependency.
-- Export ML models into runtime-light formats (`.tflite`, `.onnx`) early — it forces you to
-  confront deployment constraints before they become blockers.
-- Pin every dependency version for anything that serialises a model.
-- One service for all models beats one service per model for a small team — fewer moving parts
-  to demo and debug.
+- For a small linear model, the lightest "deployment" is no deployment — export the weights to
+  JSON and re-implement the forward pass where you need it.
+- Cache predictions on the row, not per request: inference cost becomes one-time per complaint
+  and the results are queryable (filter, sort, aggregate) like any other column.
+- Stamp every prediction with a model version so a retrain re-scores old rows automatically.
+- Always move serialised models as binary; a single mangled byte makes a pickle worthless.
 - A shared, single source of domain types keeps a multi-surface product (app + dashboard)
-  consistent.
+  consistent — the six `ai_*` fields were added in exactly one place.
 
 ### 7.3 Project Summary
 
@@ -1322,20 +1216,27 @@ category at submission time without ever blocking the core flow.
 | Backend | Supabase (PostgreSQL, Auth, Storage, RLS) |
 | Dashboard | Next.js 16, React 19, Tailwind CSS 4 |
 | Mobile | Flutter |
-| AI layer | MobileNetV2 CNN (`.tflite`) + scikit-learn TF-IDF classifier (`.pkl` / `.onnx`), FastAPI on Contabo VPS |
-| Core entities | `app_users`, `complaints`, `status_history`, `notifications`, `admin_users`, `settings` |
+| AI layer | Two scikit-learn TF-IDF + LogisticRegression classifiers (urgency, category), trained offline, exported to `model-bundle.json`, run as pure TypeScript in the dashboard; predictions cached in `complaints.ai_*` |
+| Core entities | `app_users`, `complaints` (+ `ai_*` triage fields), `status_history`, `notifications`, `admin_users`, `settings` |
 
 ### 7.4 Future Work
 
+- **Photo-based classification** — a MobileNet/EfficientNet CNN over the complaint photo, fused
+  with the text category prediction. Being non-linear, it would run in a dedicated inference
+  service (FastAPI on the VPS or a serverless GPU/CPU function) rather than in the dashboard.
+- **Citizen-facing suggestion** — surface the category prediction in the mobile Report Issue
+  form at submission time so the citizen can accept or correct it before filing.
+- **Learned urgency threshold** — add a staff "was this actually urgent?" flag and periodically
+  recalibrate the urgency model against it.
 - **Duplicate detection** — cluster nearby complaints of the same category to merge repeat
   reports of one issue.
 - **Geolocation & map view** — capture GPS with the photo; show complaints on a city map.
-- **Department routing** — auto-assign complaints to department queues based on category.
-- **SLA tracking** — per-category resolution-time targets and breach alerts.
-- **On-device offline image suggestion** — bundle the `.tflite` model via `tflite_flutter`.
+- **Department routing** — auto-assign complaints to department queues based on category and
+  predicted urgency.
+- **SLA tracking** — per-category, urgency-weighted resolution-time targets and breach alerts.
 - **Citizen feedback loop** — let citizens rate the resolution; feed ratings into analytics.
-- **Multilingual text model** — expand the text classifier's Urdu coverage and add
-  Roman-Urdu normalisation.
+- **Multilingual text model** — expand the classifiers' Urdu / Roman-Urdu coverage and add
+  transliteration normalisation before vectorising.
 
 ---
 
@@ -1344,14 +1245,14 @@ category at submission time without ever blocking the core flow.
 1. Next.js Documentation — https://nextjs.org/docs
 2. Supabase Documentation — https://supabase.com/docs
 3. Flutter Documentation — https://docs.flutter.dev
-4. `tflite_flutter` package — https://pub.dev/packages/tflite_flutter
-5. TensorFlow Lite Converter — https://www.tensorflow.org/lite/convert
+4. scikit-learn: `TfidfVectorizer` — https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html
+5. scikit-learn: `LogisticRegression` — https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
 6. scikit-learn: Model persistence — https://scikit-learn.org/stable/model_persistence.html
-7. `skl2onnx` — https://onnx.ai/sklearn-onnx/
-8. ONNX Runtime — https://onnxruntime.ai/
-9. FastAPI — https://fastapi.tiangolo.com/
-10. Sandler, M. et al. "MobileNetV2: Inverted Residuals and Linear Bottlenecks." CVPR 2018.
-11. Joulin, A. et al. "Bag of Tricks for Efficient Text Classification." EACL 2017.
+7. scikit-learn: `ENGLISH_STOP_WORDS` — https://scikit-learn.org/stable/modules/feature_extraction.html#stop-words
+8. Python `pickle` — protocol and framing — https://docs.python.org/3/library/pickle.html
+9. MDN — RegExp Unicode property escapes — https://developer.mozilla.org/docs/Web/JavaScript/Reference/Regular_expressions/Unicode_character_class_escape
+10. Joulin, A. et al. "Bag of Tricks for Efficient Text Classification." EACL 2017.
+11. Sandler, M. et al. "MobileNetV2: Inverted Residuals and Linear Bottlenecks." CVPR 2018. *(reference for the deferred photo classifier, Section 7.4)*
 12. SeeClickFix / FixMyStreet — civic issue-reporting platforms.
 
 ---
@@ -1360,13 +1261,13 @@ category at submission time without ever blocking the core flow.
 
 | Layer | Technology |
 |---|---|
-| Mobile client | Flutter (Dart), `http`, `image_picker`, `tflite_flutter` (optional) |
+| Mobile client | Flutter (Dart), `http`, `image_picker` |
 | Admin dashboard | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4 |
 | Auth / DB / Storage | Supabase (`@supabase/ssr`, `@supabase/supabase-js`) |
 | Dashboard hosting | Vercel |
-| ML training | Python, TensorFlow/Keras, scikit-learn, Google Colab |
-| ML serving | FastAPI, Uvicorn, `tflite-runtime`, `joblib` / `onnxruntime`, Docker |
-| ML hosting | Contabo VPS, Caddy (TLS + rate limit) |
+| ML training (offline) | Python, scikit-learn, `joblib`, `numpy` |
+| ML export (build-time) | `models/export_bundle.py` → `src/lib/ml/model-bundle.json` |
+| ML inference (run-time) | Pure TypeScript in the dashboard (`src/lib/ml/tfidf-lr.ts`) — no service, no host |
 | Utilities | `date-fns`, `clsx` |
 
 ## Appendix B: Source Code Structure
@@ -1376,22 +1277,33 @@ ShehriLink/
 ├── src/
 │   ├── app/
 │   │   ├── login/                     # admin auth (page + server actions)
+│   │   ├── api/triage-backfill/       # POST: score every un-triaged complaint (admin only)
 │   │   └── (dashboard)/
-│   │       ├── page.tsx               # dashboard home (stats, chart, activity)
+│   │       ├── page.tsx               # dashboard home (6 stat cards incl. High urgency, chart, activity)
 │   │       ├── complaints/
-│   │       │   ├── page.tsx           # list + filters + pagination
-│   │       │   └── [id]/              # detail + status change actions
+│   │       │   ├── page.tsx           # list + filters (incl. urgency) + sort + pagination
+│   │       │   └── [id]/              # detail + AI Triage card + status change actions
 │   │       ├── resolved/page.tsx
 │   │       ├── users/                 # supervisor: manage admin accounts
 │   │       └── settings/              # supervisor: daily limit
-│   ├── components/                    # StatCard, StatusPill, CategoryBarChart, ComplaintFilters, ...
+│   ├── components/                    # StatCard, StatusPill, UrgencyPill, CategoryBarChart, ComplaintFilters, ComplaintsListView, ...
 │   ├── lib/
 │   │   ├── supabase/                  # client / server / admin / middleware
+│   │   ├── ml/
+│   │   │   ├── model-bundle.json      # exported model weights (vocab, idf, coef, intercept, stop words)
+│   │   │   ├── tfidf-lr.ts            # pure-TS TF-IDF + LogisticRegression inference
+│   │   │   └── triage.ts              # triage() / withTriage() + MODEL_VERSION + row caching
 │   │   ├── auth.ts  format.ts  labels.ts
-│   ├── types/database.ts              # shared domain types + Database schema
+│   ├── types/database.ts              # shared domain types (incl. ComplaintUrgency + ai_* fields)
 │   └── middleware.ts                  # route protection
-├── docs/ShehriLink-Documentation.md   # this document
-└── (Phase 2) ml/                      # FastAPI service, training notebooks, exported models
+├── models/
+│   ├── urgency_classifier_v3.pkl      # trained pipelines (binary; see .gitattributes)
+│   ├── category_classifier_v3.pkl
+│   ├── export_bundle.py               # .pkl → src/lib/ml/model-bundle.json
+│   ├── verify_parity.py               # asserts the JSON reproduces the .pkl (< 1e-4)
+│   └── README.md
+├── supabase/migration-006-ai-triage.sql   # ai_* columns + partial index
+└── docs/ShehriLink-Documentation.md   # this document
 ```
 
 ## Appendix C: Checklist
@@ -1405,11 +1317,12 @@ ShehriLink/
 | Role-based access (staff vs supervisor) | Done |
 | Daily complaint limit setting | Done |
 | Mobile app: register / submit / track / notifications | In progress |
-| ML: dataset collection & labelling | Planned |
-| ML: CNN trained and exported to `.tflite` | Planned |
-| ML: text classifier trained and exported to `.pkl` / `.onnx` | Planned |
-| ML: FastAPI `/predict` service on Contabo VPS behind HTTPS | Planned |
-| ML: Flutter client with 2 s timeout + null fallback | Planned |
-| `complaints.suggested_category` / `suggestion_confidence` columns added | Planned |
+| ML: urgency + category classifiers trained (`*_v3.pkl`) | Done |
+| ML: weights exported to `src/lib/ml/model-bundle.json` (`export_bundle.py`) | Done |
+| ML: TypeScript inference engine + scikit-learn parity check (< 1e-4) | Done |
+| ML: lazy triage with row-level caching (`triage.ts`, `MODEL_VERSION`) | Done |
+| ML: `complaints.ai_*` columns + partial index (migration-006) | Done |
+| ML: urgency pill, list column / filter / sort, AI Triage card, "High urgency (open)" card | Done |
+| ML: `POST /api/triage-backfill` (admin) | Done |
+| ML: photo (CNN) classifier | Future (7.4) |
 | Unit / integration / acceptance testing | Ongoing |
-```

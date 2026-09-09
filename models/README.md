@@ -26,7 +26,8 @@ Complaints are triaged lazily the first time the list or detail page loads them
 ```bash
 pip install scikit-learn joblib numpy
 # drop the new *_v3.pkl files here, then:
-python models/export_bundle.py
+python models/export_bundle.py     # .pkl -> ../src/lib/ml/model-bundle.json
+python models/verify_parity.py     # asserts the JSON reproduces the .pkl (< 1e-4)
 ```
 
 Bump `MODEL_VERSION` in `src/lib/ml/triage.ts` so already-scored complaints get

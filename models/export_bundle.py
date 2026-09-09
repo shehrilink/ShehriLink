@@ -4,6 +4,7 @@ Regenerate src/lib/ml/model-bundle.json from the trained pipelines.
 Run after retraining:
     pip install scikit-learn joblib numpy
     python models/export_bundle.py
+    python models/verify_parity.py   # confirm the JSON still matches the .pkl
 
 The dashboard does inference in pure TypeScript (src/lib/ml/tfidf-lr.ts), so
 the only thing it needs from Python is this JSON of weights. Both pipelines
