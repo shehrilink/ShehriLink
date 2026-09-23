@@ -1,6 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { getCurrentAdmin } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { ComplaintStatus } from "@/types/database";
 
@@ -66,4 +68,35 @@ export async function updateComplaintStatus(
   revalidatePath("/");
 
   return { error: null };
+}
+
+export async function deleteComplaint(complaintId: string) {
+  const admin = await getCurrentAdmin();
+  if (!admin || admin.role !== "supervisor") {
+    return { error: "Only supervisors can delete complaints." };
+  }
+
+  const supabase = createAdminClient();
+
+  // status_history and notifications reference complaints(id) with no
+  // ON DELETE CASCADE, so clear the dependent rows first.
+  const { error: historyError } = await supabase
+    .from("status_history")
+    .delete()
+    .eq("complaint_id", complaintId);
+  if (historyError) return { error: historyError.message };
+
+  const { error: notificationError } = await supabase
+    .from("notifications")
+    .delete()
+    .eq("complaint_id", complaintId);
+  if (notificationError) return { error: notificationError.message };
+
+  const { error } = await supabase.from("complaints").delete().eq("id", complaintId);
+  if (error) return { error: error.message };
+
+  revalidatePath("/complaints");
+  revalidatePath("/resolved");
+  revalidatePath("/");
+  redirect("/complaints");
 }

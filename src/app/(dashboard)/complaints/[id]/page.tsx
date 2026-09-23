@@ -6,6 +6,8 @@ import { StatusPill } from "@/components/StatusPill";
 import { StatusChanger } from "@/components/StatusChanger";
 import { PhotoZoom } from "@/components/PhotoZoom";
 import { UrgencyPill } from "@/components/UrgencyPill";
+import { DeleteComplaintButton } from "@/components/DeleteComplaintButton";
+import { getCurrentAdmin } from "@/lib/auth";
 import { categoryLabel } from "@/lib/labels";
 import { formatWhen } from "@/lib/format";
 import { withTriageOne } from "@/lib/ml/triage";
@@ -29,6 +31,7 @@ export default async function ComplaintDetailPage({
     notFound();
   }
 
+  const admin = await getCurrentAdmin();
   const triaged = await withTriageOne(complaint);
   const categoryMismatch =
     triaged.ai_category != null && triaged.ai_category !== triaged.category;
@@ -170,6 +173,15 @@ export default async function ComplaintDetailPage({
               </div>
             </dl>
           </section>
+
+          {admin?.role === "supervisor" && (
+            <section className="bg-paper-raised border border-border rounded-md p-5">
+              <DeleteComplaintButton
+                complaintId={complaint.id}
+                refNumber={complaint.ref_number}
+              />
+            </section>
+          )}
         </div>
       </div>
     </div>
