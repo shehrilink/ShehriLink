@@ -6,9 +6,11 @@ import { deleteComplaint } from "@/app/(dashboard)/complaints/[id]/actions";
 export function DeleteComplaintButton({
   complaintId,
   refNumber,
+  compact = false,
 }: {
   complaintId: string;
   refNumber: string;
+  compact?: boolean;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +26,42 @@ export function DeleteComplaintButton({
         setConfirming(false);
       }
     });
+  }
+
+  if (compact) {
+    return (
+      <span className="inline-flex flex-col items-end gap-1">
+        {!confirming ? (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="text-xs font-medium text-brick hover:underline"
+          >
+            Delete
+          </button>
+        ) : (
+          <span className="inline-flex items-center gap-2 text-xs">
+            <button
+              type="button"
+              disabled={isPending}
+              onClick={handleDelete}
+              className="rounded bg-brick px-2 py-1 font-semibold text-white disabled:opacity-50"
+            >
+              {isPending ? "Deleting…" : "Confirm"}
+            </button>
+            <button
+              type="button"
+              disabled={isPending}
+              onClick={() => setConfirming(false)}
+              className="text-stone hover:text-ink"
+            >
+              Cancel
+            </button>
+          </span>
+        )}
+        {error && <span className="text-xs text-brick">{error}</span>}
+      </span>
+    );
   }
 
   return (

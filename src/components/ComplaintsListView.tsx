@@ -5,6 +5,8 @@ import { Pagination } from "@/components/Pagination";
 import { StatusPill } from "@/components/StatusPill";
 import { UrgencyPill } from "@/components/UrgencyPill";
 import { RefStamp } from "@/components/RefStamp";
+import { DeleteComplaintButton } from "@/components/DeleteComplaintButton";
+import { getCurrentAdmin } from "@/lib/auth";
 import { EmptyState } from "@/components/EmptyState";
 import { categoryLabel } from "@/lib/labels";
 import { formatWhen } from "@/lib/format";
@@ -34,6 +36,8 @@ export async function ComplaintsListView({
 }) {
   const page = Math.max(1, Number(params.page) || 1);
   const supabase = createAdminClient();
+  const admin = await getCurrentAdmin();
+  const canDelete = admin?.role === "supervisor";
 
   let query = supabase
     .from("complaints")
@@ -133,6 +137,7 @@ export async function ComplaintsListView({
                   <th className="px-4 py-3 font-medium">Submitted</th>
                   <th className="px-4 py-3 font-medium">Photo</th>
                   <th className="px-4 py-3 font-medium text-right">Status</th>
+                  {canDelete && <th className="px-4 py-3 font-medium text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border bg-paper-raised">
@@ -199,6 +204,15 @@ export async function ComplaintsListView({
                           <StatusPill status={c.status} />
                         </Link>
                       </td>
+                      {canDelete && (
+                        <td className="px-4 py-3 text-right">
+                          <DeleteComplaintButton
+                            complaintId={c.id}
+                            refNumber={c.ref_number}
+                            compact
+                          />
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
